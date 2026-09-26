@@ -113,6 +113,9 @@ export class TaskService {
       }
     });
 
+    // Beri XP (+50 XP) untuk produktivitas!
+    await this.addXP(task.userId, 50);
+
     return updatedTask;
   }
 
@@ -188,7 +191,108 @@ export class TaskService {
       }
     });
 
+    // Beri +25 XP atas komitmen fokus
+    await this.addXP(userId, 25);
+
     return session;
+  }
+
+  static async createSubtasks(taskId: string, titles: string[]) {
+    const data = titles.map((title, index) => ({
+      taskId,
+      title,
+      position: index,
+      status: 'TODO' as const
+    }));
+    await prisma.subtask.createMany({ data });
+    return this.getSubtasks(taskId);
+  }
+
+  static async getSubtasks(taskId: string) {
+    return prisma.subtask.findMany({
+      where: { taskId },
+      orderBy: { position: 'asc' }
+    });
+  }
+
+  static async toggleSubtask(subtaskId: string) {
+    const sub = await prisma.subtask.findUnique({ where: { id: subtaskId } });
+    if (!sub) return null;
+    const newStatus = sub.status === 'DONE' ? 'TODO' : 'DONE';
+    return prisma.subtask.update({
+      where: { id: subtaskId },
+      data: {
+        status: newStatus,
+        completedAt: newStatus === 'DONE' ? new Date() : null
+      }
+    });
+  }
+
+  static async addXP(userId: string, points: number) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return null;
+
+    const now = new Date();
+    let newStreak = user.streak || 0;
+
+    if (user.lastActiveAt) {
+      const diffHours = (now.getTime() - user.lastActiveAt.getTime()) / (1000 * 60 * 60);
+      if (diffHours >= 20 && diffHours <= 48) {
+        newStreak += 1;
+      } else if (diffHours > 48) {
+        newStreak = 1;
+      }
+    } else {
+      newStreak = 1;
+    }
+
+    return prisma.user.update({
+      where: { id: userId },
+      data: {
+        xp: { increment: points },
+        streak: newStreak,
+        lastActiveAt: now
+      }
+    });
+  }
+
+  static async getUserStats(discordId: string) {
+    const user = await prisma.user.findUnique({
+      where: { discordId },
+      include: {
+        tasks: true,
+        focusSessions: true
+      }
+    });
+    if (!user) return null;
+
+    const completedTasks = user.tasks.filter(t => t.status === 'DONE').length;
+    const totalTasks = user.tasks.length;
+    const totalFocusMinutes = user.focusSessions.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
+    const level = Math.floor(user.xp / 100) + 1;
+
+    return {
+      username: user.username,
+      xp: user.xp,
+      level,
+      streak: user.streak,
+      completedTasks,
+      totalTasks,
+      totalFocusMinutes
+    };
+  }
+
+  static async getLeaderboard(limit: number = 10) {
+    return prisma.user.findMany({
+      orderBy: { xp: 'desc' },
+      take: limit,
+      select: {
+        discordId: true,
+        username: true,
+        xp: true,
+        streak: true
+      }
+    });
   }
 
   static async getUserActiveTasks(discordId: string, limit: number = 10) {

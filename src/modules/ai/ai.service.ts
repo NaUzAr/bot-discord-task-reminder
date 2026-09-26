@@ -82,4 +82,43 @@ Output strictly valid JSON with keys:
     logger.error('All AI models failed to extract task');
     return null;
   }
+
+  static async breakdownTask(taskTitle: string): Promise<string[]> {
+    const prompt = `
+Sebagai asisten produktivitas, pecahkan tugas berikut menjadi 4 sampai 5 sub-tugas (actionable checklist) yang konkret, praktis, dan mudah dicicil oleh mahasiswa/pekerja:
+Tugas: "${taskTitle}"
+
+Keluarkan HANYA JSON array berisi string sub-tugas, contoh:
+["Cari 3 bahan referensi jurnal", "Tulis draf metodologi", "Kerjakan analisis data", "Buat kesimpulan", "Review dan format akhir"]
+`;
+
+    for (const modelName of CANDIDATE_MODELS) {
+      try {
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          generationConfig: {
+            responseMimeType: "application/json"
+          }
+        });
+
+        const result = await model.generateContent(prompt);
+        const textOutput = result.response.text();
+        if (!textOutput) continue;
+
+        const parsed = JSON.parse(textOutput);
+        if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
+          return parsed.slice(0, 5);
+        }
+      } catch (error: any) {
+        logger.warn({ model: modelName, err: error?.message || error }, 'AI breakdown attempt failed, trying fallback');
+      }
+    }
+
+    return [
+      `Persiapan bahan untuk ${taskTitle}`,
+      `Pengerjaan bagian utama ${taskTitle}`,
+      `Review dan pengecekan hasil`,
+      `Submit / selesaikan ${taskTitle}`
+    ];
+  }
 }

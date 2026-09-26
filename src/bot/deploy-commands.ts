@@ -4,6 +4,9 @@ import { logger } from '../shared/utils/logger';
 
 const commands = [
   new SlashCommandBuilder()
+    .setName('setup')
+    .setDescription('Bangun otomatis kategori & channel TaskFlow OS di server ini!'),
+  new SlashCommandBuilder()
     .setName('task')
     .setDescription('Buat task baru dengan bantuan AI (Paham bahasa sehari-hari!)')
     .addStringOption(option =>
@@ -17,6 +20,12 @@ const commands = [
   new SlashCommandBuilder()
     .setName('today')
     .setDescription('Deadline Radar: Lihat tugas-tugas kamu untuk hari ini'),
+  new SlashCommandBuilder()
+    .setName('stats')
+    .setDescription('Lihat profil produktivitasmu (XP, Level, Streak, dan Selesai)'),
+  new SlashCommandBuilder()
+    .setName('leaderboard')
+    .setDescription('Lihat papan peringkat produktivitas XP & Streak di server ini'),
   new ContextMenuCommandBuilder()
     .setName('Add to TaskFlow')
     .setType(ApplicationCommandType.Message)
