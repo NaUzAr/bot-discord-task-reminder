@@ -18,6 +18,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@prisma/client": "^5.22.0",
     "bullmq": "^6.3.9",
     "date-fns": "^4.4.0",

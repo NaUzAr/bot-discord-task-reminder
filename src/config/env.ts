@@ -5,7 +5,7 @@ dotenv.config();
 
 const envSchema = z.object({
   BOT_TOKEN: z.string().min(1),
-  CLIENT_ID: z.string().min(1),
+  CLIENT_ID: z.string().optional(),
   GUILD_ID: z.string().optional(),
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
