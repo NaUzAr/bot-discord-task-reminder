@@ -264,6 +264,14 @@ client.on('messageCreate', async (message) => {
       )
       .setColor(embedColor);
 
+    if (task.description) {
+      embed.addFields({
+        name: '📝 Spesifikasi & Format Tugas',
+        value: task.description.length > 1024 ? task.description.slice(0, 1020) + '...' : task.description,
+        inline: false
+      });
+    }
+
     if (task.linkUrl) {
       embed.addFields({
         name: '🔗 Tempat Pengumpulan',
@@ -278,6 +286,15 @@ client.on('messageCreate', async (message) => {
 
     const targetChannel = thread || message.channel;
     await targetChannel.send({ embeds: [embed], components: actionRows });
+
+    // Jika AI mendeteksi sub-tugas/format checklist otomatis (misal dari gambar format makalah/outline), langsung kirim checklist interaktif!
+    if (extracted.subtasks && extracted.subtasks.length > 0) {
+      const createdSubtasks = await TaskService.getSubtasks(task.id);
+      if (createdSubtasks.length > 0) {
+        const { embed: subtaskEmbed, components: subtaskComponents } = renderSubtasksChecklist(task, createdSubtasks);
+        await targetChannel.send({ embeds: [subtaskEmbed], components: subtaskComponents });
+      }
+    }
 
     if (thread) {
       const groupNote = isGroup ? ` (👥 Anggota: ${mentionedUsers.map(u => `<@${u.id}>`).join(', ')})` : '';
@@ -332,16 +349,20 @@ function renderSubtasksChecklist(task: { title: string }, subtasks: any[]) {
     .setFooter({ text: 'TaskFlow OS • Interactive Subtasks (Tersimpan di DB)' })
     .setTimestamp();
 
-  const toggleButtons = subtasks.slice(0, 5).map((s, idx) =>
-    new ButtonBuilder()
-      .setCustomId(`subtask_toggle_${s.id}`)
-      .setLabel(`#${idx + 1} ${s.status === 'DONE' ? '↩️ Batal' : '✔️ Centang'}`)
-      .setStyle(s.status === 'DONE' ? ButtonStyle.Secondary : ButtonStyle.Primary)
-  );
-
-  const compRows = toggleButtons.length > 0
-    ? [new ActionRowBuilder<ButtonBuilder>().addComponents(toggleButtons)]
-    : [];
+  // Dukung hingga 15 tombol interaktif (dibagi rapi per 5 tombol per ActionRow)
+  const compRows: ActionRowBuilder<ButtonBuilder>[] = [];
+  const maxButtons = Math.min(subtasks.length, 15);
+  for (let i = 0; i < maxButtons; i += 5) {
+    const chunk = subtasks.slice(i, i + 5);
+    const rowButtons = chunk.map((s, relIdx) => {
+      const idx = i + relIdx;
+      return new ButtonBuilder()
+        .setCustomId(`subtask_toggle_${s.id}`)
+        .setLabel(`#${idx + 1} ${s.status === 'DONE' ? '↩️ Batal' : '✔️ Centang'}`)
+        .setStyle(s.status === 'DONE' ? ButtonStyle.Secondary : ButtonStyle.Primary);
+    });
+    compRows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(rowButtons));
+  }
 
   return { embed: breakdownEmbed, components: compRows };
 }
@@ -552,11 +573,20 @@ client.on('interactionCreate', async (interaction) => {
         .setPlaceholder('https://classroom.google.com/...')
         .setRequired(false);
 
+      const descInput = new TextInputBuilder()
+        .setCustomId('description')
+        .setLabel('Catatan / Spesifikasi Format')
+        .setStyle(TextInputStyle.Paragraph)
+        .setValue(task.description || '')
+        .setPlaceholder('Format pengerjaan, bab, atau catatan khusus...')
+        .setRequired(false);
+
       modal.addComponents(
         new ActionRowBuilder<TextInputBuilder>().addComponents(titleInput),
         new ActionRowBuilder<TextInputBuilder>().addComponents(dueInput),
         new ActionRowBuilder<TextInputBuilder>().addComponents(priorityInput),
-        new ActionRowBuilder<TextInputBuilder>().addComponents(linkInput)
+        new ActionRowBuilder<TextInputBuilder>().addComponents(linkInput),
+        new ActionRowBuilder<TextInputBuilder>().addComponents(descInput)
       );
 
       await interaction.showModal(modal);
@@ -617,6 +647,7 @@ client.on('interactionCreate', async (interaction) => {
       const newDueText = interaction.fields.getTextInputValue('due')?.trim();
       const newPriorityText = interaction.fields.getTextInputValue('priority')?.toUpperCase().trim() || 'MEDIUM';
       const newLink = interaction.fields.getTextInputValue('linkUrl')?.trim() || null;
+      const newDesc = interaction.fields.getTextInputValue('description')?.trim() || null;
 
       let dueAtDate: Date | null = null;
       if (newDueText && newDueText.length > 0) {
@@ -639,7 +670,8 @@ client.on('interactionCreate', async (interaction) => {
           title: newTitle,
           dueAt: dueAtDate,
           priority: priorityEnum,
-          linkUrl: newLink
+          linkUrl: newLink,
+          description: newDesc
         }
       });
 
@@ -660,6 +692,7 @@ client.on('interactionCreate', async (interaction) => {
         `📌 **Judul:** ${updated.title}\n` +
         `⏰ **Deadline:** ${dlStr}\n` +
         `🔥 **Prioritas:** ${updated.priority}` +
+        (updated.description ? `\n📝 **Catatan:** ${updated.description}` : '') +
         (updated.linkUrl ? `\n🔗 **Link:** [Klik di sini](${updated.linkUrl})` : '')
       );
       return;

@@ -54,6 +54,7 @@ export class TaskService {
         userId: user.id,
         guildId: dbGuildId,
         title: extracted.title,
+        description: extracted.description || null,
         linkUrl: extracted.linkUrl,
         dueAt: dueAtDate,
         estimatedMinutes: extracted.estimatedMinutes,
@@ -66,6 +67,12 @@ export class TaskService {
         assignedUserIds
       }
     });
+
+    // 1b. Jika AI mendeteksi sub-tugas/format checklist, otomatis buatkan di database
+    if (extracted.subtasks && extracted.subtasks.length > 0) {
+      await this.createSubtasks(task.id, extracted.subtasks);
+      logger.info(`Otomatis membuat ${extracted.subtasks.length} subtask checklist untuk task ${task.id}`);
+    }
 
     // 2. Jika ada deadline, daftarkan penjadwalan reminder ke BullMQ (Redis)
     if (dueAtDate) {

@@ -5,6 +5,13 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export const TaskExtractionSchema = z.object({
   title: z.string().min(1).max(200).describe("The clear, actionable title of the task."),
+  description: z.string().nullable().optional().describe("Detailed specifications, guidelines, format instructions, or notes about the assignment."),
+  subtasks: z.preprocess((val) => {
+    if (Array.isArray(val)) {
+      return val.map(item => String(item).trim()).filter(Boolean);
+    }
+    return [];
+  }, z.array(z.string())).default([]).describe("List of subtasks, chapters, or checklist items extracted from format/instructions."),
   dueAt: z.preprocess((val) => {
     if (!val || typeof val !== 'string') return null;
     const d = new Date(val);
@@ -61,14 +68,18 @@ Context:
 
 Rules:
 1. Extract the core task title.
-2. Determine exact deadline (dueAt) in ISO 8601 UTC format based on relative time (e.g. "besok jam 8 malam" or "lusa pagi"). Calculate from current server time and user timezone. Return null if no deadline is mentioned.
-3. Determine estimated duration in minutes as an integer if mentioned (e.g. "2 jam" -> 120, "30 menit" -> 30). Return null if not mentioned.
-4. Guess priority: strictly "LOW", "MEDIUM", "HIGH", or "URGENT". Default to "MEDIUM".
-5. Extract submission link (linkUrl): if user mentions a URL (e.g. https://classroom.google.com/..., Google Drive, LMS, etc.), extract it. Return null if no link is mentioned.
+2. If the user message contains detailed instructions, specifications, format guidelines, or notes, extract them into "description" in clean readable markdown. Return null if none.
+3. If the message lists steps, sub-sections, or checklist items (e.g. "1. Judul, 2. Pendahuluan..."), extract each item into the "subtasks" array so it can be tracked. Return empty array [] if none.
+4. Determine exact deadline (dueAt) in ISO 8601 UTC format based on relative time (e.g. "besok jam 8 malam" or "lusa pagi"). Calculate from current server time and user timezone. Return null if no deadline is mentioned.
+5. Determine estimated duration in minutes as an integer if mentioned (e.g. "2 jam" -> 120, "30 menit" -> 30). Return null if not mentioned.
+6. Guess priority: strictly "LOW", "MEDIUM", "HIGH", or "URGENT". Default to "MEDIUM".
+7. Extract submission link (linkUrl): if user mentions a URL (e.g. https://classroom.google.com/..., Google Drive, LMS, etc.), extract it. Return null if no link is mentioned.
 
 Output strictly valid JSON with keys:
 {
   "title": string,
+  "description": string | null,
+  "subtasks": string[],
   "dueAt": string | null,
   "estimatedMinutes": number | null,
   "priority": "LOW" | "MEDIUM" | "HIGH" | "URGENT",
@@ -124,23 +135,37 @@ Output strictly valid JSON with keys:
 
     const systemInstruction = `
 You are an intelligent multimodal vision task parsing assistant for TaskFlow Discord Bot.
-Your job is to read and understand assignment details from images (e.g. presentation slides, WhatsApp chat screenshots, handwritten notes, syllabus, or LMS screenshots) and optional user captions in English or Indonesian.
+Your job is to read and understand assignment details from images (e.g. presentation slides, document screenshots, format requirements, syllabus, WhatsApp chat screenshots, handwritten notes, or LMS screenshots) and optional user captions in English or Indonesian.
 Context:
 - Current Server Time (UTC): ${nowUTC}
 - User Local Timezone: ${timezone}
 
 Rules:
-1. Carefully read and OCR all text, instructions, and dates from the image.
+1. Carefully read and OCR all text, instructions, format specifications, and dates from the image.
 2. If the user provided a caption, use it to understand additional context (e.g. subject name or specific instructions).
-3. Extract the core task title (e.g. "Tugas 3 Kalkulus: Integral Lipat", "Laporan Praktikum Fisika Dasar").
-4. Determine exact deadline (dueAt) in ISO 8601 UTC format. Calculate from current server time and user timezone. Return null if no deadline is found.
-5. Determine estimated duration in minutes if mentioned. Return null if not found.
-6. Determine priority: strictly "LOW", "MEDIUM", "HIGH", or "URGENT". Default to "MEDIUM" (or "HIGH" if deadline is within 24h).
-7. Extract submission link (linkUrl) if any URL is visible in the image or caption. Return null if not mentioned.
+3. Extract the core task title (e.g. "Makalah Pemrograman R", "Laporan Praktikum Fisika", "Tugas Makalah").
+4. Extract detailed specifications, formatting rules, or notes into "description" (e.g. if the image specifies paper format, outline, font, or instructions).
+5. If the image contains a list of steps, chapters, paper structure, or requirements (such as:
+   "Format makalah:
+   1. Judul
+   2. Pendahuluan
+   3. Teori singkat
+   4. Koding/skrip program R
+   5. Hasil dan Pembahasan
+   6. Simpulan dan saran
+   7. Referensi
+   8. Lampiran (print out)"),
+   extract these individual items into the "subtasks" array so they can become an interactive checklist!
+6. Determine exact deadline (dueAt) in ISO 8601 UTC format. Calculate from current server time and user timezone. Return null if no deadline is found.
+7. Determine estimated duration in minutes if mentioned. Return null if not found.
+8. Determine priority: strictly "LOW", "MEDIUM", "HIGH", or "URGENT". Default to "MEDIUM" (or "HIGH" if deadline is within 24h).
+9. Extract submission link (linkUrl) if any URL is visible in the image or caption. Return null if not mentioned.
 
 Output strictly valid JSON with keys:
 {
   "title": string,
+  "description": string | null,
+  "subtasks": string[],
   "dueAt": string | null,
   "estimatedMinutes": number | null,
   "priority": "LOW" | "MEDIUM" | "HIGH" | "URGENT",
@@ -156,8 +181,8 @@ Output strictly valid JSON with keys:
     };
 
     const promptText = caption && caption.trim().length > 0 
-      ? `User caption: "${caption}". Extract the task details from this image and caption.`
-      : "Extract the task details, title, deadline, and links from this image.";
+      ? `User caption: "${caption}". Extract the task details, format, outline, and checklist from this image.`
+      : "Extract the task details, title, format specification, subtasks/checklist, deadline, and links from this image.";
 
     for (const modelName of CANDIDATE_MODELS) {
       try {
@@ -216,14 +241,18 @@ Rules:
 1. Carefully listen to and transcribe the speech in the audio.
 2. If the user provided a caption, combine it with the voice content.
 3. Extract the core task title.
-4. Determine exact deadline (dueAt) in ISO 8601 UTC format. Calculate from current server time and user timezone. Return null if no deadline is mentioned.
-5. Determine estimated duration in minutes if mentioned. Return null if not found.
-6. Determine priority: strictly "LOW", "MEDIUM", "HIGH", or "URGENT". Default to "MEDIUM".
-7. Extract submission link (linkUrl) if any URL is spoken or written in caption. Return null if not mentioned.
+4. If instructions, notes, or format guidelines are mentioned, extract them into "description". Return null if none.
+5. If subtasks or steps are mentioned, extract them into "subtasks" array. Return empty array [] if none.
+6. Determine exact deadline (dueAt) in ISO 8601 UTC format. Calculate from current server time and user timezone. Return null if no deadline is mentioned.
+7. Determine estimated duration in minutes if mentioned. Return null if not found.
+8. Determine priority: strictly "LOW", "MEDIUM", "HIGH", or "URGENT". Default to "MEDIUM".
+9. Extract submission link (linkUrl) if any URL is spoken or written in caption. Return null if not mentioned.
 
 Output strictly valid JSON with keys:
 {
   "title": string,
+  "description": string | null,
+  "subtasks": string[],
   "dueAt": string | null,
   "estimatedMinutes": number | null,
   "priority": "LOW" | "MEDIUM" | "HIGH" | "URGENT",
