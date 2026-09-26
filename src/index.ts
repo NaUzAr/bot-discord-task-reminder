@@ -40,12 +40,12 @@ client.once('clientReady', async () => {
     await GuildService.cleanInboxChannel(guild);
   }
 
-  // 🧹 Pasang interval Smart Inbox Cleaner setiap 20 detik agar inbox-tugas selalu 100% bersih
+  // 🧹 Maintenance Garbage Collection: bersihkan inbox setiap 1 jam (bukan per detik) agar hemat resource & bebas rate-limit
   setInterval(async () => {
     for (const [, guild] of client.guilds.cache) {
-      await GuildService.cleanInboxChannel(guild, client, 15);
+      await GuildService.cleanInboxChannel(guild, client, 30);
     }
-  }, 20 * 1000);
+  }, 60 * 60 * 1000);
 
   // ☀️ Mulai scheduler Daily Morning Briefing (07:00 WIB)
   BriefingService.startScheduler(client);
@@ -61,6 +61,10 @@ client.on('messageCreate', async (message) => {
 
   const hasAttachment = message.attachments.size > 0;
   if (!isInbox) return;
+
+  // 🧹 Event-Driven Clean: Bersihkan pesan usang HANYA di channel server ini saat ada aktivitas (Zero beban ke server lain)
+  GuildService.cleanInboxChannel(message.guild, client, 20).catch(() => null);
+
   if (message.content.trim().length < 3 && !hasAttachment) return;
 
   try {

@@ -270,11 +270,18 @@ export class GuildService {
       const client = (typeof guildOrId !== 'string' ? guildOrId.client : clientInstance);
       if (!client) return;
 
-      const inboxChannel = await client.channels.fetch(dbGuild.inboxChannelId).catch(() => null) as TextChannel | null;
+      // Cek cache lokal terlebih dahulu untuk menghindari unnecessary REST API call ke Discord
+      let inboxChannel: TextChannel | null = null;
+      if (typeof guildOrId !== 'string') {
+        inboxChannel = (guildOrId.channels.cache.get(dbGuild.inboxChannelId) as TextChannel) || null;
+      }
+      if (!inboxChannel) {
+        inboxChannel = await client.channels.fetch(dbGuild.inboxChannelId).catch(() => null) as TextChannel | null;
+      }
       if (!inboxChannel || !('messages' in inboxChannel)) return;
 
-      const messages = await inboxChannel.messages.fetch({ limit: 50 }).catch(() => null);
-      if (!messages) return;
+      const messages = await inboxChannel.messages.fetch({ limit: 20 }).catch(() => null);
+      if (!messages || messages.size === 0) return;
 
       const now = Date.now();
       for (const msg of messages.values()) {
