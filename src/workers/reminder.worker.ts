@@ -18,7 +18,7 @@ client.login(env.BOT_TOKEN);
 export const reminderWorker = new Worker('reminder-queue', async (job) => {
   // 🎯 1. Tangani Notifikasi Sesi Fokus Selesai (Pomodoro End)
   if (job.name === 'focus-end') {
-    const { userId, discordId, durationMinutes, guildId } = job.data;
+    const { userId, discordId, durationMinutes, guildId, taskId } = job.data;
     try {
       const user = await prisma.user.findUnique({ where: { id: userId } });
       if (!user) return;
@@ -58,22 +58,75 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
         }
       }
 
-      // B. Kirim ucapan selamat via DM ke pengguna
+      // B. Kirim ucapan selamat via DM ke pengguna dengan tombol istirahat 5 menit
       const discordUser = await client.users.fetch(targetDiscordId).catch(() => null);
       if (discordUser) {
         const embed = new EmbedBuilder()
-          .setTitle('🎉 Sesi Fokus Selesai!')
+          .setTitle('🎉 25 Menit Tuntas! (Sesi Fokus Sukses 🍅)')
           .setDescription(
-            `Hebat! Kamu telah menyelesaikan sesi fokus selama **${durationMinutes} menit** (+${durationMinutes >= 50 ? 50 : 25} XP).\n` +
-            `Istirahat sejenak 5 menit ya! ☕`
+            `Hebat! Kamu telah menyelesaikan sesi fokus selama **${durationMinutes} menit** (+${durationMinutes >= 50 ? 50 : 25} XP)!\n\n` +
+            `Saatnya rehat 5 menit:\n` +
+            `• Berdiri & regangkan badanmu 🧘\n` +
+            `• Ambil segelas air putih 💧\n` +
+            `• Istirahatkan mata sejenak dari layar\n\n` +
+            `*Klik tombol di bawah untuk memulai waktu istirahat:*`
           )
           .setColor('#00FF7F')
           .setTimestamp();
 
-        await discordUser.send({ embeds: [embed] }).catch(() => null);
+        const breakButtons = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(taskId ? `focus_break_5_${taskId}` : 'focus_break_5')
+            .setLabel('☕ Mulai Istirahat 5 Menit')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(taskId ? `task_focus_${taskId}_25` : 'room_focus_25')
+            .setLabel('🍅 Skip & Lanjut Fokus')
+            .setStyle(ButtonStyle.Secondary)
+        );
+
+        await discordUser.send({ embeds: [embed], components: [breakButtons] }).catch(() => null);
       }
     } catch (err) {
       logger.error({ err }, 'Gagal mengirim notifikasi focus-end');
+    }
+    return;
+  }
+
+  // ☕ 1b. Tangani Notifikasi Istirahat Selesai (Break End)
+  if (job.name === 'break-end') {
+    const { userId, discordId, taskId } = job.data;
+    try {
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user) return;
+      const targetDiscordId = discordId || user.discordId;
+      const discordUser = await client.users.fetch(targetDiscordId).catch(() => null);
+
+      if (discordUser) {
+        const breakEndEmbed = new EmbedBuilder()
+          .setTitle('⏰ Waktu Istirahat 5 Menit Selesai!')
+          .setDescription(
+            'Badan dan pikiran sudah lebih segar? Saatnya kembali produktif!\n\n' +
+            'Siap memulai putaran fokus berikutnya? 🚀'
+          )
+          .setColor('#00E5FF')
+          .setTimestamp();
+
+        const resumeButtons = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(taskId ? `task_focus_${taskId}_25` : 'room_focus_25')
+            .setLabel('🎯 Mulai Fokus 25m')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(taskId ? `task_focus_${taskId}_50` : 'room_focus_50')
+            .setLabel('🔥 Deep Work 50m')
+            .setStyle(ButtonStyle.Primary)
+        );
+
+        await discordUser.send({ embeds: [breakEndEmbed], components: [resumeButtons] }).catch(() => null);
+      }
+    } catch (err) {
+      logger.error({ err }, 'Gagal mengirim notifikasi break-end');
     }
     return;
   }

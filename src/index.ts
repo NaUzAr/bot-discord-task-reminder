@@ -23,6 +23,7 @@ import { prisma } from './database/prisma';
 import { generateGoogleCalendarUrl } from './shared/utils/calendar';
 import { BriefingService } from './modules/briefing/briefing.service';
 import { ExportService } from './modules/export/export.service';
+import { reminderQueue } from './workers/queue';
 
 // 🔄 Menyalakan BullMQ Worker secara otomatis saat bot berjalan!
 import './workers/reminder.worker'; 
@@ -667,18 +668,111 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
 
+      // 3. Tombol Kontrol Sesi Aktif
+      const controlButtons = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`focus_stop_${session.id}`)
+          .setLabel('⏹️ Hentikan Sesi Lebih Awal')
+          .setStyle(ButtonStyle.Danger),
+        ...(taskId ? [
+          new ButtonBuilder()
+            .setCustomId(`task_done_${taskId}`)
+            .setLabel('✅ Tugas Selesai Duluan')
+            .setStyle(ButtonStyle.Success)
+        ] : [])
+      );
+
       const focusEmbed = new EmbedBuilder()
-        .setTitle('🎯 Sesi Fokus Berhasil Dimulai!')
+        .setTitle('🍅 Sesi Pomodoro Dimulai!')
         .setDescription(
           `⏱️ **Waktu Fokus:** **${duration} menit** (+${duration >= 50 ? 50 : 25} XP)\n` +
           `🛡️ **Status Server:** Role \`@In Focus\` telah diaktifkan untukmu!\n` +
           `⏰ **Selesai pada:** <t:${endTimestamp}:t> (<t:${endTimestamp}:R>)\n\n` +
-          'Matikan notifikasi HP dan mulailah bekerja. Bot akan otomatis mencabut role dan mengirim DM saat waktu istirahat tiba! ☕'
+          '💡 *Jauhkan HP, tutup tab media sosial, dan fokus bekerja. Bot akan mengirim notifikasi saat waktu istirahat tiba!* ☕'
         )
         .setColor('#00FF7F')
         .setTimestamp();
 
-      await interaction.editReply({ embeds: [focusEmbed] });
+      await interaction.editReply({ embeds: [focusEmbed], components: [controlButtons] });
+
+      // Kirim juga kartu kontrol ini ke DM pengguna agar mudah diakses
+      try {
+        await interaction.user.send({ embeds: [focusEmbed], components: [controlButtons] });
+      } catch {}
+      return;
+    }
+
+    // Tombol: Hentikan Sesi Fokus Lebih Awal
+    if (customId.startsWith('focus_stop_')) {
+      const sessionId = customId.replace('focus_stop_', '');
+      await interaction.deferUpdate();
+
+      try {
+        const session = await prisma.focusSession.findUnique({ where: { id: sessionId } });
+        if (session && !session.endedAt) {
+          await prisma.focusSession.update({
+            where: { id: sessionId },
+            data: { endedAt: new Date() }
+          });
+        }
+
+        // Batalkan BullMQ job focus-end
+        const job = await reminderQueue.getJob(`focus_${sessionId}`);
+        if (job) await job.remove();
+
+        // Lepas role @In Focus di guild
+        if (interaction.guild && interaction.member) {
+          const focusRole = interaction.guild.roles.cache.find(r => r.name.toLowerCase().includes('in focus'));
+          if (focusRole && 'roles' in interaction.member) {
+            await (interaction.member as any).roles.remove(focusRole).catch(() => null);
+          }
+        }
+
+        const stopEmbed = new EmbedBuilder()
+          .setTitle('⏹️ Sesi Fokus Dihentikan')
+          .setDescription('Sesi fokus telah dihentikan lebih awal. Tidak apa-apa, kamu bisa mulai lagi kapan saja saat siap! ☕')
+          .setColor('#95A5A6')
+          .setTimestamp();
+
+        await interaction.editReply({ embeds: [stopEmbed], components: [] });
+      } catch (err) {
+        logger.warn({ err }, 'Gagal menghentikan sesi fokus');
+      }
+      return;
+    }
+
+    // Tombol: Mulai Rehat 5 Menit (Pomodoro Break)
+    if (customId.startsWith('focus_break_')) {
+      const parts = customId.split('_');
+      const minutes = parseInt(parts[2] || '5', 10);
+      const taskId = parts[3] || '';
+      await interaction.deferReply({ ephemeral: true });
+
+      const user = await TaskService.getOrCreateUser(interaction.user.id, interaction.user.username);
+      const delay = minutes * 60 * 1000;
+      const breakEndTime = new Date(Date.now() + delay);
+      const breakEndTimestamp = Math.floor(breakEndTime.getTime() / 1000);
+
+      await reminderQueue.add('break-end', {
+        userId: user.id,
+        discordId: interaction.user.id,
+        taskId
+      }, {
+        delay,
+        jobId: `break_${user.id}_${Date.now()}`
+      });
+
+      const breakEmbed = new EmbedBuilder()
+        .setTitle('☕ Waktu Istirahat Dimulai!')
+        .setDescription(
+          `⏱️ **Durasi Rehat:** **${minutes} menit**\n` +
+          `⏰ **Selesai pada:** <t:${breakEndTimestamp}:t> (<t:${breakEndTimestamp}:R>)\n\n` +
+          'Regangkan badanmu 🧘, minum segelas air putih 💧, dan jauhi layar sejenak. Bot akan mengirim notifikasi saat waktu istirahat habis! 🎵'
+        )
+        .setColor('#F1C40F')
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [breakEmbed] });
       return;
     }
   }
