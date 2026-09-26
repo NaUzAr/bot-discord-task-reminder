@@ -38,7 +38,15 @@ export const TaskExtractionSchema = z.object({
 export type ExtractedTask = z.infer<typeof TaskExtractionSchema>;
 
 const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
-const CANDIDATE_MODELS = ['gemini-3.5-flash', 'gemini-3.8-flash'];
+const CANDIDATE_MODELS = [
+  'gemini-3.5-flash-lite', // ⚡ Kuota Terbesar: 500 RPD, 15 RPM (Respon super cepat & irit)
+  'gemini-3.1-flash-lite', // ⚡ Cadangan Lite: 500 RPD, 15 RPM
+  'gemini-3.8-flash',      // 🛡️ Cadangan Flash 3.8: 20 RPD, 5 RPM
+  'gemini-3.7-flash',      // 🛡️ Cadangan Flash 3.7: 20 RPD, 5 RPM
+  'gemini-3.6-flash',      // 🛡️ Cadangan Flash 3.6: 20 RPD, 5 RPM
+  'gemini-3-flash',        // 🛡️ Cadangan Flash 3: 20 RPD, 5 RPM
+  'gemini-3.5-flash'       // 🛡️ Cadangan Terakhir
+];
 
 export class AIService {
   static async extractTask(userInput: string, timezone: string = 'Asia/Jakarta'): Promise<ExtractedTask | null> {
