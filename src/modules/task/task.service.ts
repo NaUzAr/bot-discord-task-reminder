@@ -45,7 +45,7 @@ export class TaskService {
           title: task.title
         }, {
           delay,
-          jobId: `reminder:${task.id}` // Deterministic ID agar mudah di-cancel jika task selesai duluan
+          jobId: `reminder_${task.id}` // Deterministic ID agar mudah di-cancel jika task selesai duluan
         });
         logger.info(`Reminder dijadwalkan untuk task ${task.id} dalam ${delay}ms`);
       }
