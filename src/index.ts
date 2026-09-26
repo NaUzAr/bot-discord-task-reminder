@@ -840,6 +840,13 @@ client.on('interactionCreate', async (interaction) => {
           .setDescription(`📌 **Judul:** ${task.title}\n⏰ **Deadline:** ${deadlineText}\n🔥 **Prioritas:** ${task.priority}`)
           .setColor('#00E5FF');
 
+        if (task.description) {
+          embed.addFields({
+            name: '📝 Catatan / Spesifikasi',
+            value: task.description.length > 1024 ? task.description.slice(0, 1020) + '...' : task.description
+          });
+        }
+
         if (task.linkUrl) {
           embed.addFields({
             name: '🔗 Tempat Pengumpulan',
@@ -931,6 +938,13 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle('✅ Task Berhasil Dibuat & Reminder Dijadwalkan!')
         .setDescription(`📌 **Judul:** ${task.title}\n⏰ **Deadline:** ${deadlineText}\n🔥 **Prioritas:** ${task.priority}`)
         .setColor('#00FF7F');
+
+      if (task.description) {
+        embed.addFields({
+          name: '📝 Catatan / Spesifikasi',
+          value: task.description.length > 1024 ? task.description.slice(0, 1020) + '...' : task.description
+        });
+      }
 
       if (task.linkUrl) {
         embed.addFields({
