@@ -253,4 +253,44 @@ export class GuildService {
       logger.warn({ err }, 'Gagal update radar dashboard');
     }
   }
+
+  /**
+   * Membersihkan channel inbox-tugas dari pesan chat atau orphan messages,
+   * menyisakan hanya pesan Panduan Utama agar inbox selalu 100% bersih seperti drop-zone baru.
+   */
+  static async cleanInboxChannel(guildOrId: Guild | string, clientInstance?: Client, maxAgeSeconds = 15) {
+    try {
+      const guildId = typeof guildOrId === 'string' ? guildOrId : guildOrId.id;
+      const dbGuild = await prisma.guild.findUnique({
+        where: { discordGuildId: guildId }
+      });
+
+      if (!dbGuild || !dbGuild.inboxChannelId) return;
+
+      const client = (typeof guildOrId !== 'string' ? guildOrId.client : clientInstance);
+      if (!client) return;
+
+      const inboxChannel = await client.channels.fetch(dbGuild.inboxChannelId).catch(() => null) as TextChannel | null;
+      if (!inboxChannel || !('messages' in inboxChannel)) return;
+
+      const messages = await inboxChannel.messages.fetch({ limit: 50 }).catch(() => null);
+      if (!messages) return;
+
+      const now = Date.now();
+      for (const msg of messages.values()) {
+        // Jangan hapus pesan panduan inbox utama!
+        if (dbGuild.inboxGuideMessageId && msg.id === dbGuild.inboxGuideMessageId) continue;
+
+        // Hapus jika usia pesan sudah melebihi batas waktu (misal > 15 detik)
+        const ageMs = now - msg.createdTimestamp;
+        if (ageMs > maxAgeSeconds * 1000) {
+          await msg.delete().catch(() => null);
+          logger.info(`[Inbox Cleaner] Pesan lama ${msg.id} di #${inboxChannel.name} berhasil dibersihkan.`);
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Gagal membersihkan inbox channel');
+    }
+  }
 }
+

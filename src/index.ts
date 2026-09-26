@@ -36,7 +36,16 @@ client.once('clientReady', async () => {
       const inboxCh = guild.channels.cache.get(dbGuild.inboxChannelId) as TextChannel | undefined;
       if (inboxCh) await GuildService.updateInboxGuide(guild, inboxCh, dbGuild.radarChannelId || undefined);
     }
+    // Bersihkan pesan lama tertinggal di inbox saat bot online
+    await GuildService.cleanInboxChannel(guild);
   }
+
+  // 🧹 Pasang interval Smart Inbox Cleaner setiap 20 detik agar inbox-tugas selalu 100% bersih
+  setInterval(async () => {
+    for (const [, guild] of client.guilds.cache) {
+      await GuildService.cleanInboxChannel(guild, client, 15);
+    }
+  }, 20 * 1000);
 
   // ☀️ Mulai scheduler Daily Morning Briefing (07:00 WIB)
   BriefingService.startScheduler(client);
@@ -89,6 +98,16 @@ client.on('messageCreate', async (message) => {
 
     if (!extracted) {
       await message.reactions.cache.get('👀')?.users.remove(client.user?.id);
+      const warnMsg = await message.reply({
+        content: '⚠️ AI belum dapat mendeteksi rincian tugas atau deadline dari pesan ini. Pastikan menyertakan nama tugas dan waktu (contoh: *"Laporan Kalkulus besok jam 8 malam"*).\n*(Pesan ini otomatis dihapus dalam 8 detik agar inbox tetap bersih)*'
+      }).catch(() => null);
+
+      setTimeout(async () => {
+        try {
+          if (warnMsg) await warnMsg.delete().catch(() => null);
+          await message.delete().catch(() => null);
+        } catch {}
+      }, 8 * 1000);
       return;
     }
 
@@ -214,16 +233,18 @@ client.on('messageCreate', async (message) => {
     if (thread) {
       const groupNote = isGroup ? ` (👥 Anggota: ${mentionedUsers.map(u => `<@${u.id}>`).join(', ')})` : '';
       const replyMsg = await message.reply({
-        content: `✅ **Task ${isGroup ? 'Kelompok' : 'Individu'} Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.${groupNote}\n*(Pesan ini otomatis hilang dalam 2 menit agar channel tetap bersih)*`
-      });
-      // Bersihkan notifikasi bot di channel inbox-tugas setelah 2 menit (120.000 ms) agar chat tetap bersih
+        content: `✅ **Task ${isGroup ? 'Kelompok' : 'Individu'} Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.${groupNote}\n*(Pesan input & notifikasi ini otomatis terhapus dalam 10 detik agar inbox tetap bersih)*`
+      }).catch(() => null);
+
+      // Bersihkan notifikasi bot & pesan input asli user di inbox-tugas setelah 10 detik (10.000 ms) agar inbox selalu 100% bersih!
       setTimeout(async () => {
         try {
-          await replyMsg.delete();
+          if (replyMsg) await replyMsg.delete().catch(() => null);
+          await message.delete().catch(() => null);
         } catch {
-          // Abaikan jika sudah dihapus secara manual
+          // Abaikan jika sudah dihapus
         }
-      }, 2 * 60 * 1000);
+      }, 10 * 1000);
     }
 
     // Perbarui Live Radar Dashboard di channel deadline-radar secara realtime
@@ -266,18 +287,18 @@ client.on('interactionCreate', async (interaction) => {
       const deleteThreadIfExists = async () => {
         try {
           let threadToDelete: any = null;
-          let parentChannel: any = null;
+          let parentChannelId: string | null = null;
 
           if (isInsideThread) {
             threadToDelete = interaction.channel;
-            parentChannel = (interaction.channel as any)?.parent;
+            parentChannelId = (interaction.channel as any)?.parentId || null;
           } else if (updated.sourceChannelId) {
             const ch = await client.channels.fetch(updated.sourceChannelId).catch(() => null);
             if (ch?.isThread()) {
               threadToDelete = ch;
-              parentChannel = ch.parent;
+              parentChannelId = ch.parentId;
             } else if (ch && 'messages' in ch) {
-              parentChannel = ch;
+              parentChannelId = ch.id;
               if (updated.sourceMessageId && 'threads' in ch) {
                 const msg = await (ch as any).messages.fetch(updated.sourceMessageId).catch(() => null);
                 if (msg?.thread) {
@@ -287,6 +308,43 @@ client.on('interactionCreate', async (interaction) => {
             }
           }
 
+          let dbG: any = null;
+          if (updated.guildId) {
+            dbG = await prisma.guild.findUnique({ where: { id: updated.guildId } });
+            if (!parentChannelId && dbG?.inboxChannelId) {
+              parentChannelId = dbG.inboxChannelId;
+            }
+          }
+
+          // 1. Bersihkan pesan chat & notifikasi bot di inbox-tugas secara menyeluruh
+          if (parentChannelId) {
+            const parentChannel = await client.channels.fetch(parentChannelId).catch(() => null);
+            if (parentChannel && 'messages' in parentChannel) {
+              try {
+                // Hapus pesan asli user jika masih ada
+                if (updated.sourceMessageId) {
+                  await (parentChannel as any).messages.delete(updated.sourceMessageId).catch(() => null);
+                }
+                // Cari dan hapus notifikasi bot yang me-reply atau menyebut thread ini
+                const recent = await (parentChannel as any).messages.fetch({ limit: 25 }).catch(() => null);
+                if (recent) {
+                  for (const m of recent.values()) {
+                    if (dbG?.inboxGuideMessageId && m.id === dbG.inboxGuideMessageId) continue;
+                    const isRefSource = updated.sourceMessageId && m.reference?.messageId === updated.sourceMessageId;
+                    const mentionsThread = threadToDelete && m.content?.includes(threadToDelete.id);
+                    const isUserSource = updated.sourceMessageId && m.id === updated.sourceMessageId;
+                    if (isRefSource || mentionsThread || isUserSource) {
+                      await m.delete().catch(() => null);
+                    }
+                  }
+                }
+              } catch (cleanErr) {
+                logger.warn({ cleanErr }, 'Gagal menghapus pesan inbox saat task selesai');
+              }
+            }
+          }
+
+          // 2. Beri pesan penutup di thread lalu hapus thread secara permanen
           if (threadToDelete) {
             if (!isInsideThread) {
               const closingEmbed = new EmbedBuilder()
@@ -297,23 +355,13 @@ client.on('interactionCreate', async (interaction) => {
             }
 
             await new Promise((resolve) => setTimeout(resolve, 3000));
-            await threadToDelete.delete('Tugas telah diselesaikan oleh user');
+            await threadToDelete.delete('Tugas telah diselesaikan oleh user').catch(() => null);
             logger.info(`Thread ${threadToDelete.id} berhasil dihapus permanen karena task ${updated.id} selesai.`);
           }
 
-          // Hapus pesan chat asli pengguna di channel utama agar inbox-tugas 100% bersih!
-          if (updated.sourceMessageId && parentChannel) {
-            const sourceMsg = await parentChannel.messages.fetch(updated.sourceMessageId).catch(() => null);
-            if (sourceMsg) {
-              await sourceMsg.delete().catch(() => null);
-              logger.info(`Pesan chat asli ${updated.sourceMessageId} di inbox-tugas berhasil dihapus.`);
-            }
-          }
-
-          // Perbarui Live Radar Dashboard secara realtime
-          if (updated.guildId) {
-            const dbG = await prisma.guild.findUnique({ where: { id: updated.guildId } });
-            if (dbG) await GuildService.updateRadarDashboard(dbG.discordGuildId, client);
+          // 3. Perbarui Live Radar Dashboard secara realtime
+          if (dbG) {
+            await GuildService.updateRadarDashboard(dbG.discordGuildId, client);
           } else if (interaction.guild) {
             await GuildService.updateRadarDashboard(interaction.guild);
           }
