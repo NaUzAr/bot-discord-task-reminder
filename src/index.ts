@@ -19,7 +19,8 @@ const client = new Client({
 client.once('clientReady', async () => {
   logger.info(`🤖 Bot is ready! Logged in as ${client.user?.tag}`);
   if (client.user) {
-    await deployCommands(client.user.id);
+    const guildIds = client.guilds.cache.map(g => g.id);
+    await deployCommands(client.user.id, guildIds);
   }
 });
 
