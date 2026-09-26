@@ -1,10 +1,10 @@
-import { Guild, ChannelType, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, TextChannel } from 'discord.js';
+import { Guild, ChannelType, EmbedBuilder, PermissionFlagsBits, TextChannel } from 'discord.js';
 import { prisma } from '../../database/prisma';
 import { logger } from '../../shared/utils/logger';
 
 export class GuildService {
   static async setupGuildOS(guild: Guild) {
-    logger.info(`Setting up TaskFlow OS for guild: ${guild.name} (${guild.id})`);
+    logger.info(`Setting up streamlined TaskFlow OS for guild: ${guild.name} (${guild.id})`);
 
     // 1. Cari atau buat Kategori "📁 ━━━━ TASKFLOW OS ━━━━"
     let category = guild.channels.cache.find(
@@ -18,135 +18,88 @@ export class GuildService {
       });
     }
 
-    // 2. Buat atau temukan channel-channel pendukung di dalam kategori
-    const getOrCreateChannel = async (name: string, topic: string) => {
-      let channel = guild.channels.cache.find(
-        c => c.type === ChannelType.GuildText && c.name === name
-      ) as TextChannel | undefined;
+    // 2. Buat atau temukan channel 1: 📥・inbox-tugas
+    let inboxChannel = guild.channels.cache.find(
+      c => c.type === ChannelType.GuildText && c.name.includes('inbox')
+    ) as TextChannel | undefined;
 
-      if (!channel) {
-        channel = await guild.channels.create({
-          name,
-          type: ChannelType.GuildText,
-          parent: category.id,
-          topic
-        }) as TextChannel;
-      }
-      return channel;
-    };
+    if (!inboxChannel) {
+      inboxChannel = await guild.channels.create({
+        name: '📥・inbox-tugas',
+        type: ChannelType.GuildText,
+        parent: category.id,
+        topic: 'Ketik tugas/deadline santai di sini. AI TaskFlow akan otomatis mengekstrak & membuat thread checklist!'
+      }) as TextChannel;
 
-    const inboxChannel = await getOrCreateChannel(
-      '📥・inbox-tugas',
-      'Drop chat tugas/deadline di sini. AI TaskFlow akan otomatis menjadwalkannya!'
-    );
+      // Welcome Card di Inbox
+      const inboxEmbed = new EmbedBuilder()
+        .setTitle('📥 TaskFlow Inbox Aktif!')
+        .setDescription(
+          'Selamat datang di **Task Inbox**! Channel ini khusus untuk mencatat tugas secara instan tanpa command rumit.\n\n' +
+          '💬 **Cukup ketik pesan biasa di sini:**\n' +
+          '> *"Besok jam 8 malam kumpul laporan kalkulus di https://classroom.google.com/"*\n\n' +
+          '⚡ AI otomatis membuat **Thread Rapi** untuk setiap tugas agar channel tetap bersih & tidak spam!'
+        )
+        .setColor('#00E5FF')
+        .setFooter({ text: 'TaskFlow OS • Auto-Listen Powered by Gemini AI' });
+      await inboxChannel.send({ embeds: [inboxEmbed] });
+    }
 
-    const radarChannel = await getOrCreateChannel(
-      '🚨・deadline-radar',
-      'Papan radar pengumuman deadline tugas bersama & reminder harian'
-    );
+    // 3. Buat atau temukan channel 2: 🚨・deadline-radar (READ ONLY untuk member agar bersih)
+    let radarChannel = guild.channels.cache.find(
+      c => c.type === ChannelType.GuildText && c.name.includes('deadline-radar')
+    ) as TextChannel | undefined;
 
-    const focusChannel = await getOrCreateChannel(
-      '🎯・focus-room',
-      'Ruang Pomodoro bersama. Klik tombol untuk memulai sesi fokus belajar/nugas!'
-    );
+    if (!radarChannel) {
+      radarChannel = await guild.channels.create({
+        name: '🚨・deadline-radar',
+        type: ChannelType.GuildText,
+        parent: category.id,
+        topic: 'Papan radar deadline tugas server (Read-Only)',
+        permissionOverwrites: [
+          {
+            id: guild.roles.everyone.id,
+            deny: [PermissionFlagsBits.SendMessages] // Member tidak bisa spam chat di sini
+          },
+          {
+            id: guild.client.user.id,
+            allow: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks]
+          }
+        ]
+      }) as TextChannel;
 
-    const leaderboardChannel = await getOrCreateChannel(
-      '🏆・leaderboard',
-      'Papan peringkat XP & Streak Produktivitas mahasiswa/anggota'
-    );
+      // Welcome Card di Radar
+      const radarEmbed = new EmbedBuilder()
+        .setTitle('🚨 Deadline Radar Aktif!')
+        .setDescription(
+          'Channel ini adalah pusat pemantauan tugas bersama di server ini.\n' +
+          'Papan ini bersifat **Read-Only** agar pengumuman tugas selalu bersih dan mudah dibaca!'
+        )
+        .setColor('#FFCC00')
+        .setFooter({ text: 'Ketik /today untuk melihat tugas deadline hari ini' });
+      await radarChannel.send({ embeds: [radarEmbed] });
+    }
 
-    // 3. Simpan data channel ke database PostgreSQL
+    // 4. Simpan ke Database
     await prisma.guild.upsert({
       where: { discordGuildId: guild.id },
       update: {
         name: guild.name,
         inboxChannelId: inboxChannel.id,
         radarChannelId: radarChannel.id,
-        focusChannelId: focusChannel.id,
-        leaderboardChannelId: leaderboardChannel.id,
       },
       create: {
         discordGuildId: guild.id,
         name: guild.name,
         inboxChannelId: inboxChannel.id,
         radarChannelId: radarChannel.id,
-        focusChannelId: focusChannel.id,
-        leaderboardChannelId: leaderboardChannel.id,
       }
     });
-
-    // 4. Kirim Welcome Cards ke channel-channel baru
-
-    // Inbox Card
-    const inboxEmbed = new EmbedBuilder()
-      .setTitle('📥 TaskFlow Auto-Listen Inbox Aktif!')
-      .setDescription(
-        'Selamat datang di **Task Inbox**! Kamu tidak perlu repot mengetik command rumit.\n\n' +
-        '💬 **Cukup ketik pesan obrolan biasa di channel ini:**\n' +
-        '> *"Besok sore jam 3 kumpul laporan praktikum fisika ya guys"*\n\n' +
-        '⚡ AI TaskFlow akan otomatis mendeteksi, mencatat, dan menjadwalkan reminder!'
-      )
-      .setColor('#00E5FF')
-      .setFooter({ text: 'TaskFlow OS • Auto-Listen Powered by Gemini AI' });
-    await inboxChannel.send({ embeds: [inboxEmbed] });
-
-    // Radar Card
-    const radarEmbed = new EmbedBuilder()
-      .setTitle('🚨 Deadline Radar Aktif!')
-      .setDescription(
-        'Channel ini adalah pusat pemantauan tugas bersama di server ini.\n' +
-        'Tugas yang dibuat di inbox atau via `/task` akan dipantau di sini!'
-      )
-      .setColor('#FFCC00')
-      .setFooter({ text: 'Ketik /today untuk melihat ringkasan deadline hari ini' });
-    await radarChannel.send({ embeds: [radarEmbed] });
-
-    // Focus Room Card with persistent buttons
-    const focusEmbed = new EmbedBuilder()
-      .setTitle('🎯 Pomodoro Focus Lounge')
-      .setDescription(
-        'Tingkatkan produktivitas belajar dan nugasmu dengan teknik Pomodoro!\n\n' +
-        'Pilih durasi fokus di bawah. Bot akan mengunci fokusmu dan mengingatkan saat waktu istirahat tiba! ☕'
-      )
-      .setColor('#9B59B6')
-      .addFields(
-        { name: '🎯 25 Menit', value: 'Sesi Pomodoro Klasik (+25 XP)', inline: true },
-        { name: '⏱️ 50 Menit', value: 'Deep Work Session (+50 XP)', inline: true }
-      );
-
-    const focusRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId('room_focus_25')
-        .setLabel('Mulai Fokus 25m')
-        .setStyle(ButtonStyle.Primary)
-        .setEmoji('🎯'),
-      new ButtonBuilder()
-        .setCustomId('room_focus_50')
-        .setLabel('Mulai Fokus 50m')
-        .setStyle(ButtonStyle.Success)
-        .setEmoji('⏱️')
-    );
-    await focusChannel.send({ embeds: [focusEmbed], components: [focusRow] });
-
-    // Leaderboard Card
-    const lbEmbed = new EmbedBuilder()
-      .setTitle('🏆 Productivity Hall of Fame')
-      .setDescription(
-        'Kumpulkan **XP** dan pertahankan **Daily Streak** dengan:\n' +
-        '• Menyelesaikan tugas tepat waktu (+50 XP)\n' +
-        '• Menuntaskan sesi fokus Pomodoro (+25 XP)\n\n' +
-        '*Papan peringkat akan otomatis diperbarui setiap ada tugas selesai!*'
-      )
-      .setColor('#F1C40F')
-      .setFooter({ text: 'Ketik /stats untuk cek profilmu' });
-    await leaderboardChannel.send({ embeds: [lbEmbed] });
 
     return {
       category,
       inboxChannel,
-      radarChannel,
-      focusChannel,
-      leaderboardChannel
+      radarChannel
     };
   }
 }

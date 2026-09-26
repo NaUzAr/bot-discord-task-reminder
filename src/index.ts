@@ -118,7 +118,17 @@ client.on('messageCreate', async (message) => {
       .setFooter({ text: 'Klik "AI Breakdown" untuk memecah tugas ini jadi checklist praktis!' })
       .setTimestamp();
 
-    await message.reply({ embeds: [embed], components: [row] });
+    // Buat Discord Thread otomatis pada pesan pengguna agar channel utama tetap bersih
+    const thread = await message.startThread({
+      name: `📌 ${task.title.slice(0, 90)}`,
+      autoArchiveDuration: 1440
+    });
+
+    await thread.send({ embeds: [embed], components: [row] });
+
+    await message.reply({
+      content: `✅ **Task Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.`
+    });
   } catch (err) {
     logger.error({ err }, 'Error in auto-listen inbox');
   }
@@ -313,11 +323,9 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.editReply(
         `✅ **TaskFlow OS Workspace Berhasil Dibangun!**\n\n` +
         `📁 **Kategori:** \`${res.category.name}\`\n` +
-        `• 📥 <#${res.inboxChannel.id}> (Auto-listen chat tugas aktif)\n` +
-        `• 🚨 <#${res.radarChannel.id}> (Papan radar deadline & reminder)\n` +
-        `• 🎯 <#${res.focusChannel.id}> (Ruang Pomodoro bersama)\n` +
-        `• 🏆 <#${res.leaderboardChannel.id}> (Papan peringkat XP & Streak)\n\n` +
-        `*Silakan coba ketik pengumuman tugas di channel <#${res.inboxChannel.id}>!*`
+        `• 📥 <#${res.inboxChannel.id}> (Auto-listen chat tugas + Auto-thread rapi)\n` +
+        `• 🚨 <#${res.radarChannel.id}> (Papan radar deadline - Read Only)\n\n` +
+        `*Silakan coba ketik tugas di channel <#${res.inboxChannel.id}>!*`
       );
     } catch (err) {
       logger.error({ err }, 'Gagal setup guild OS');
