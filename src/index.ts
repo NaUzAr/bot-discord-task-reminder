@@ -620,14 +620,60 @@ client.on('interactionCreate', async (interaction) => {
     // Tombol: Focus Session (25m / 50m)
     if (customId.startsWith('task_focus_') || customId.startsWith('room_focus_')) {
       const duration = customId.includes('50') ? 50 : 25;
+      const parts = customId.split('_');
+      const taskId = customId.startsWith('task_focus_') ? parts[2] : '';
       await interaction.deferReply({ ephemeral: true });
-      await TaskService.startFocusSession('', interaction.user.id, duration);
+
+      const session = await TaskService.startFocusSession(taskId, interaction.user.id, duration, interaction.guildId || undefined);
+
+      const endTime = new Date(Date.now() + duration * 60 * 1000);
+      const endTimestamp = Math.floor(endTime.getTime() / 1000);
+
+      // 1. Berikan role @In Focus ke user jika di dalam Guild
+      if (interaction.guild && interaction.member) {
+        try {
+          const focusRole = interaction.guild.roles.cache.find(r => r.name.toLowerCase().includes('in focus'));
+          if (focusRole && 'roles' in interaction.member) {
+            await (interaction.member as any).roles.add(focusRole).catch(() => null);
+          }
+        } catch (rErr) {
+          logger.warn({ rErr }, 'Gagal memberikan role In Focus');
+        }
+      }
+
+      // 2. Kirim pengumuman publik di channel 🎯・fokus-room jika ada
+      if (interaction.guild) {
+        try {
+          const dbG = await prisma.guild.findUnique({ where: { discordGuildId: interaction.guild.id } });
+          const focusChanId = dbG?.focusChannelId;
+          if (focusChanId) {
+            const fChannel = await interaction.guild.channels.fetch(focusChanId).catch(() => null);
+            if (fChannel && 'send' in fChannel) {
+              const publicFocusEmbed = new EmbedBuilder()
+                .setTitle('🧘 Sesi Deep Work Dimulai!')
+                .setDescription(
+                  `👤 <@${interaction.user.id}> telah mengaktifkan **Sesi Fokus ${duration} Menit**!\n\n` +
+                  `🛡️ **Status:** \`@In Focus\` (Do Not Disturb Aktif)\n` +
+                  `⏰ **Berakhir pada:** <t:${endTimestamp}:t> (<t:${endTimestamp}:R>)\n\n` +
+                  `*Mohon tidak mendistraksi selama sesi berlangsung. Semangat produktif! ☕*`
+                )
+                .setColor('#9B59B6')
+                .setTimestamp();
+              await (fChannel as any).send({ embeds: [publicFocusEmbed] });
+            }
+          }
+        } catch (pubErr) {
+          logger.warn({ pubErr }, 'Gagal mengirim pengumuman publik fokus');
+        }
+      }
 
       const focusEmbed = new EmbedBuilder()
-        .setTitle('🎯 Sesi Fokus Dimulai!')
+        .setTitle('🎯 Sesi Fokus Berhasil Dimulai!')
         .setDescription(
-          `Waktu fokus: **${duration} menit** (+${duration === 25 ? 25 : 50} XP)\n` +
-          'Matikan distraksi dan selamat produktif! Bot akan otomatis mengirim DM saat waktu istirahat tiba! ☕'
+          `⏱️ **Waktu Fokus:** **${duration} menit** (+${duration >= 50 ? 50 : 25} XP)\n` +
+          `🛡️ **Status Server:** Role \`@In Focus\` telah diaktifkan untukmu!\n` +
+          `⏰ **Selesai pada:** <t:${endTimestamp}:t> (<t:${endTimestamp}:R>)\n\n` +
+          'Matikan notifikasi HP dan mulailah bekerja. Bot akan otomatis mencabut role dan mengirim DM saat waktu istirahat tiba! ☕'
         )
         .setColor('#00FF7F')
         .setTimestamp();
@@ -899,8 +945,10 @@ client.on('interactionCreate', async (interaction) => {
         `✅ **TaskFlow OS Workspace Berhasil Dibangun!**\n\n` +
         `📁 **Kategori:** \`${res.category.name}\`\n` +
         `• 📥 <#${res.inboxChannel.id}> (Auto-listen chat tugas + Auto-thread rapi)\n` +
-        `• 🚨 <#${res.radarChannel.id}> (Papan radar deadline - Read Only)\n\n` +
-        `*Silakan coba ketik tugas di channel <#${res.inboxChannel.id}>!*`
+        `• 🚨 <#${res.radarChannel.id}> (Papan radar deadline - Read Only)\n` +
+        `• 🎯 <#${res.focusChannel.id}> (Pomodoro Focus Hub & Status @In Focus)\n` +
+        (res.voiceChannel ? `• 🎧 <#${res.voiceChannel.id}> (Study Voice Room)\n\n` : '\n') +
+        `*Silakan coba ketik tugas di channel <#${res.inboxChannel.id}> atau aktifkan sesi fokus di <#${res.focusChannel.id}>!*`
       );
     } catch (err) {
       logger.error({ err }, 'Gagal setup guild OS');
@@ -1177,6 +1225,71 @@ client.on('interactionCreate', async (interaction) => {
       logger.error({ err }, 'Gagal mengambil data /week');
       await interaction.editReply('❌ Gagal memuat agenda mingguan.');
     }
+  }
+
+  // /plan - AI Daily Planner & Time-Blocking
+  if (interaction.commandName === 'plan') {
+    await interaction.deferReply();
+    const timeframe = interaction.options.getString('waktu') || 'Malam ini (3-4 jam)';
+
+    const discordId = interaction.user.id;
+    const activeTasks = await prisma.task.findMany({
+      where: {
+        OR: [
+          { user: { discordId } },
+          { assignedUserIds: { has: discordId } }
+        ],
+        status: { in: ['TODO', 'IN_PROGRESS'] },
+        deletedAt: null
+      },
+      orderBy: [
+        { dueAt: 'asc' },
+        { priority: 'desc' }
+      ],
+      take: 8
+    });
+
+    if (activeTasks.length === 0) {
+      const cleanEmbed = new EmbedBuilder()
+        .setTitle('🎉 Tidak Ada Tugas yang Menumpuk!')
+        .setDescription('Kamu tidak memiliki tugas aktif saat ini. Nikmati waktu luangmu atau santai bersama teman-teman! ☕')
+        .setColor('#00FF7F')
+        .setTimestamp();
+      await interaction.editReply({ embeds: [cleanEmbed] });
+      return;
+    }
+
+    try {
+      const planText = await AIService.generateStudyPlan(activeTasks, timeframe);
+
+      const planEmbed = new EmbedBuilder()
+        .setTitle('🧠 AI Daily Planner & Time-Blocking')
+        .setDescription(
+          `⏱️ **Alokasi Waktu:** \`${timeframe}\`\n` +
+          `📋 **Tugas Dianalisis:** ${activeTasks.length} tugas aktif\n\n` +
+          planText
+        )
+        .setColor('#9B59B6')
+        .setFooter({ text: 'TaskFlow OS • AI Study Planner • Klik tombol di bawah untuk langsung mulai fokus!' })
+        .setTimestamp();
+
+      const planButtons = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId('room_focus_25')
+          .setLabel('🎯 Mulai Fokus 25m')
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId('room_focus_50')
+          .setLabel('🔥 Deep Work 50m')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await interaction.editReply({ embeds: [planEmbed], components: [planButtons] });
+    } catch (planErr) {
+      logger.error({ planErr }, 'Gagal menyusun AI plan');
+      await interaction.editReply('❌ Terjadi kesalahan saat menyusun rencana belajar.');
+    }
+    return;
   }
 
   if (interaction.commandName === 'stats') {

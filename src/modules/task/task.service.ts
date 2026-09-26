@@ -74,31 +74,9 @@ export class TaskService {
       logger.info(`Otomatis membuat ${extracted.subtasks.length} subtask checklist untuk task ${task.id}`);
     }
 
-    // 2. Jika ada deadline, daftarkan penjadwalan reminder ke BullMQ (Redis)
+    // 2. Jika ada deadline, daftarkan 3 Tahap Reminder Bertingkat (H-24H, H-3H, H-30M) ke BullMQ (Redis)
     if (dueAtDate) {
-      // Set reminder H-1 Jam sebelum deadline
-      const reminderTime = subMinutes(dueAtDate, 60);
-      const delay = reminderTime.getTime() - Date.now();
-      
-      // Jika delay > 0 jadwalkan H-1 jam, jika waktu tersisa < 1 jam tapi masih di masa depan, jadwalkan langsung
-      const effectiveDelay = delay > 0 ? delay : Math.max(0, dueAtDate.getTime() - Date.now() - 5 * 60 * 1000);
-
-      if (effectiveDelay > 0) {
-        for (const mDiscordId of assignedUserIds) {
-          const memberUser = await this.getOrCreateUser(mDiscordId, mDiscordId === discordId ? username : 'GroupMember');
-          await reminderQueue.add('send-reminder', {
-            taskId: task.id,
-            userId: memberUser.id,
-            title: task.title,
-            linkUrl: task.linkUrl,
-            taskType
-          }, {
-            delay: effectiveDelay,
-            jobId: `reminder_${task.id}_${memberUser.id}`
-          });
-        }
-        logger.info(`Reminder dijadwalkan untuk task ${task.id} (${taskType}) kepada ${assignedUserIds.length} anggota`);
-      }
+      await this.scheduleTaskReminders(task);
     }
 
     // Catat ke Activity Log
@@ -114,6 +92,99 @@ export class TaskService {
     return task;
   }
 
+  /**
+   * ⏰ Menjadwalkan 3 Tahap Pengingat Bertingkat:
+   * 1. Stage H-24H (1 Hari Sebelum): Peringatan persiapan awal
+   * 2. Stage H-3H  (3 Jam Sebelum): Peringatan hitung mundur
+   * 3. Stage H-30M (30 Menit Sebelum): Panggilan terakhir / Final Call
+   */
+  static async scheduleTaskReminders(task: Task) {
+    if (!task.dueAt) return;
+    const nowMs = Date.now();
+    const dueMs = task.dueAt.getTime();
+    const totalMinutesLeft = (dueMs - nowMs) / (1000 * 60);
+
+    const STAGES = [
+      {
+        id: 'H24',
+        minutesBefore: 24 * 60,
+        title: '⏰ Pengingat H-24 Jam (Besok Deadline!)',
+        desc: 'Tugas ini harus dikumpulkan besok! Sudah mulai mencicil pekerjaanmu?',
+        color: '#F1C40F' // Kuning
+      },
+      {
+        id: 'H3',
+        minutesBefore: 3 * 60,
+        title: '⚠️ Pengingat H-3 Jam (Hitung Mundur)',
+        desc: 'Waktu tersisa 3 jam lagi! Segera tuntaskan bagian penting dari tugas ini.',
+        color: '#E67E22' // Oranye
+      },
+      {
+        id: 'H30M',
+        minutesBefore: 30,
+        title: '🚨 Panggilan Terakhir (H-30 Menit)',
+        desc: 'Deadline tinggal 30 menit! Pastikan file tugas sudah siap dan di-submit ke tempat pengumpulan.',
+        color: '#E74C3C' // Merah
+      }
+    ];
+
+    let scheduledCount = 0;
+    for (const stage of STAGES) {
+      const triggerTimeMs = dueMs - (stage.minutesBefore * 60 * 1000);
+      const delay = triggerTimeMs - nowMs;
+
+      // Hanya jadwalkan jika waktu pemicu masih di masa depan
+      if (delay > 0) {
+        await reminderQueue.add('send-reminder', {
+          taskId: task.id,
+          stageId: stage.id,
+          stageTitle: stage.title,
+          stageDesc: stage.desc,
+          color: stage.color,
+          channelId: task.sourceChannelId,
+          taskType: task.taskType
+        }, {
+          delay,
+          jobId: `reminder_${task.id}_${stage.id}`
+        });
+        scheduledCount++;
+      }
+    }
+
+    // Fallback: Jika waktu tersisa kurang dari 30 menit tapi masih di masa depan (> 1 menit)
+    if (scheduledCount === 0 && totalMinutesLeft > 1) {
+      const urgentDelay = Math.max(1000, (totalMinutesLeft - 2) * 60 * 1000);
+      await reminderQueue.add('send-reminder', {
+        taskId: task.id,
+        stageId: 'URGENT',
+        stageTitle: '🚨 Peringatan Mendesak Deadline!',
+        stageDesc: `Batas waktu pengumpulan tinggal ${Math.round(totalMinutesLeft)} menit lagi! Segera tuntaskan & kumpulkan tugasmu!`,
+        color: '#E74C3C',
+        channelId: task.sourceChannelId,
+        taskType: task.taskType
+      }, {
+        delay: urgentDelay,
+        jobId: `reminder_${task.id}_urgent`
+      });
+      scheduledCount++;
+    }
+
+    logger.info(`Berhasil menjadwalkan ${scheduledCount} tahap reminder untuk task ${task.id} (${task.taskType})`);
+  }
+
+  /**
+   * Membatalkan seluruh reminder terjadwal untuk task tertentu
+   */
+  static async cancelTaskReminders(taskId: string) {
+    const stageIds = ['H24', 'H3', 'H30M', 'urgent'];
+    for (const s of stageIds) {
+      try {
+        const job = await reminderQueue.getJob(`reminder_${taskId}_${s}`);
+        if (job) await job.remove();
+      } catch {}
+    }
+  }
+
   static async markTaskDone(taskId: string): Promise<Task | null> {
     const task = await prisma.task.findUnique({ where: { id: taskId } });
     if (!task) return null;
@@ -126,20 +197,8 @@ export class TaskService {
       }
     });
 
-    // Batalkan scheduled reminder jobs jika masih ada di BullMQ
-    try {
-      const assignedIds = task.assignedUserIds || [];
-      const userIdsToCancel = [task.userId, ...assignedIds];
-      for (const uId of userIdsToCancel) {
-        const job = await reminderQueue.getJob(`reminder_${taskId}_${uId}`);
-        if (job) await job.remove();
-      }
-      const defaultJob = await reminderQueue.getJob(`reminder_${taskId}`);
-      if (defaultJob) await defaultJob.remove();
-      logger.info(`Scheduled reminder job for task ${taskId} removed.`);
-    } catch (err) {
-      logger.warn({ err }, `Could not remove reminder job for task ${taskId}`);
-    }
+    // Batalkan seluruh jadwal reminder yang masih tertunda di BullMQ
+    await this.cancelTaskReminders(taskId);
 
     // Catat ke Activity Log
     await prisma.activityLog.create({
@@ -164,11 +223,17 @@ export class TaskService {
     const delay = minutes * 60 * 1000;
     const snoozeJobId = `reminder_${task.id}_snooze_${Date.now()}`;
 
+    // Batalkan pengingat sebelumnya & jadwalkan pengingat tunda
+    await this.cancelTaskReminders(taskId);
+
     await reminderQueue.add('send-reminder', {
       taskId: task.id,
-      userId: task.userId,
-      title: task.title,
-      linkUrl: task.linkUrl
+      stageId: 'SNOOZE',
+      stageTitle: '⏰ Pengingat Tugas (Setelah Ditunda)',
+      stageDesc: `Pengingat tugas ini sebelumnya ditunda selama ${minutes} menit. Waktunya kembali produktif!`,
+      color: '#F1C40F',
+      channelId: task.sourceChannelId,
+      taskType: task.taskType
     }, {
       delay,
       jobId: snoozeJobId
@@ -182,7 +247,8 @@ export class TaskService {
         userId: task.userId,
         reminderAt: reminderTime,
         status: 'PENDING',
-        deliveryType: 'DM'
+        deliveryType: task.sourceChannelId ? 'THREAD_AND_DM' : 'DM',
+        deliveryChannelId: task.sourceChannelId || null
       }
     });
 
@@ -199,11 +265,13 @@ export class TaskService {
     return reminderTime;
   }
 
-  static async startFocusSession(taskId: string, userId: string, durationMinutes: number = 25) {
+  static async startFocusSession(taskId: string, discordId: string, durationMinutes: number = 25, guildId?: string) {
+    const user = await this.getOrCreateUser(discordId, 'User');
+
     const session = await prisma.focusSession.create({
       data: {
-        taskId,
-        userId,
+        taskId: taskId && taskId.length > 0 ? taskId : null,
+        userId: user.id,
         startedAt: new Date(),
         durationMinutes
       }
@@ -213,9 +281,11 @@ export class TaskService {
     const delay = durationMinutes * 60 * 1000;
     await reminderQueue.add('focus-end', {
       sessionId: session.id,
-      userId,
-      taskId,
-      durationMinutes
+      userId: user.id,
+      discordId,
+      taskId: session.taskId,
+      durationMinutes,
+      guildId
     }, {
       delay,
       jobId: `focus_${session.id}`
@@ -223,15 +293,16 @@ export class TaskService {
 
     await prisma.activityLog.create({
       data: {
-        userId,
-        taskId,
+        userId: user.id,
+        taskId: session.taskId,
         eventType: 'FOCUS_STARTED',
-        metadata: { durationMinutes }
+        metadata: { durationMinutes, guildId }
       }
     });
 
-    // Beri +25 XP atas komitmen fokus
-    await this.addXP(userId, 25);
+    // Beri XP (+25 atau +50) atas komitmen fokus
+    const xpPoints = durationMinutes >= 50 ? 50 : 25;
+    await this.addXP(user.id, xpPoints);
 
     return session;
   }

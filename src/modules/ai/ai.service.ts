@@ -337,4 +337,56 @@ Keluarkan HANYA JSON array berisi string sub-tugas, contoh:
       `Submit / selesaikan ${taskTitle}`
     ];
   }
+
+  /**
+   * 🧠 AI Daily Planner & Time-Blocking Generator
+   * Menganalisis daftar tugas aktif dan waktu luang untuk membuat jadwal eksekusi Pomodoro yang realistis
+   */
+  static async generateStudyPlan(
+    tasks: { title: string; priority: string; dueAt: Date | null; estimatedMinutes: number | null; description?: string | null }[],
+    timeframe: string = 'Malam ini (3-4 jam)',
+    timezone: string = 'Asia/Jakarta'
+  ): Promise<string> {
+    const taskSummary = tasks.map((t, idx) => {
+      const dl = t.dueAt ? t.dueAt.toLocaleString('id-ID', { timeZone: timezone }) : 'Tanpa deadline';
+      const est = t.estimatedMinutes ? `${t.estimatedMinutes} menit` : 'belum ada estimasi';
+      return `${idx + 1}. "${t.title}" | Prioritas: ${t.priority} | Deadline: ${dl} | Estimasi: ${est}`;
+    }).join('\n');
+
+    const prompt = `
+Kamu adalah AI Executive Productivity & Study Coach kelas dunia untuk bot Discord TaskFlow.
+Bantu mahasiswa/pekerja ini menyusun rencana time-blocking dan urutan pengerjaan tugas yang sangat realistis, terstruktur, dan memotivasi.
+
+Daftar Tugas Aktif:
+${taskSummary}
+
+Ketersediaan Waktu / Sesi Belajar:
+"${timeframe}"
+
+Instruksi:
+1. Urutkan tugas berdasarkan metode Eisenhower (Prioritas URGENT/HIGH dan deadline terdekat didahulukan).
+2. Buat pembagian blok waktu (Time-Blocking) menggunakan teknik Pomodoro (blok 25-50 menit kerja + jeda istirahat 5-15 menit).
+3. Berikan "🎯 First Focus Target" (tugas spesifik pertama yang harus diserang sekarang).
+4. Berikan tips singkat anti-prokrastinasi yang menyemangati.
+5. Format dalam Markdown Discord yang sangat rapi dan enak dibaca dengan bullet points dan emoji.
+`;
+
+    for (const modelName of CANDIDATE_MODELS) {
+      try {
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        const text = result.response.text();
+        if (text && text.trim().length > 0) return text.trim();
+      } catch (err: any) {
+        logger.warn({ model: modelName, err: err?.message || err }, 'Gagal generate study plan, trying fallback...');
+      }
+    }
+
+    return `### 🧠 Rencana Belajar Cepat\n\n` +
+      `• **🎯 Fokus Pertama:** Selesaikan tugas prioritas tertinggi selama 25-50 menit.\n` +
+      `• **☕ Jeda:** Istirahat santai 5-10 menit tanpa membuka medsos.\n` +
+      `• **🚀 Lanjutan:** Cicil checklist sub-tugas berikutnya.\n\n` +
+      `*Tekan tombol Fokus di bawah untuk langsung mengaktifkan timer!*`;
+  }
 }
+

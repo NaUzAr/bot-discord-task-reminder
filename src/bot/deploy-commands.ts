@@ -24,6 +24,14 @@ const commands = [
     .setName('week')
     .setDescription('Weekly Agenda Horizon: Lihat seluruh jadwal tugas 7 hari ke depan'),
   new SlashCommandBuilder()
+    .setName('plan')
+    .setDescription('AI Daily Planner: Susun jadwal belajar & time-blocking cerdas dari tugas aktifmu')
+    .addStringOption(option =>
+      option.setName('waktu')
+        .setDescription('Rentang waktu luangmu (contoh: "19:00 - 23:00" atau "malam ini 3 jam")')
+        .setRequired(false)
+    ),
+  new SlashCommandBuilder()
     .setName('stats')
     .setDescription('Lihat profil produktivitasmu (XP, Level, Streak, dan Selesai)'),
   new SlashCommandBuilder()

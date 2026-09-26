@@ -1,4 +1,4 @@
-import { Guild, ChannelType, EmbedBuilder, PermissionFlagsBits, TextChannel, Client } from 'discord.js';
+import { Guild, ChannelType, EmbedBuilder, PermissionFlagsBits, TextChannel, VoiceChannel, ActionRowBuilder, ButtonBuilder, ButtonStyle, Client } from 'discord.js';
 import { prisma } from '../../database/prisma';
 import { logger } from '../../shared/utils/logger';
 
@@ -56,17 +56,123 @@ export class GuildService {
       }) as TextChannel;
     }
 
-    // 4. Update atau kirim Panduan di Inbox
+    // 4. Buat atau temukan channel 3: 🎯・fokus-room (Pomodoro Focus Controller & Aktivitas Deep Work)
+    let focusChannel = guild.channels.cache.find(
+      c => c.type === ChannelType.GuildText && c.name.includes('fokus-room')
+    ) as TextChannel | undefined;
+
+    if (!focusChannel) {
+      focusChannel = await guild.channels.create({
+        name: '🎯・fokus-room',
+        type: ChannelType.GuildText,
+        parent: category.id,
+        topic: 'Pomodoro Hub: Masuk ke sesi fokus untuk produktivitas maksimal & status @In Focus'
+      }) as TextChannel;
+    }
+
+    // 5. Buat atau temukan channel 4: 🎧・Focus Room (Voice)
+    let voiceChannel = guild.channels.cache.find(
+      c => c.type === ChannelType.GuildVoice && c.name.toLowerCase().includes('focus room')
+    ) as VoiceChannel | undefined;
+
+    if (!voiceChannel) {
+      voiceChannel = await guild.channels.create({
+        name: '🎧・Focus Room (Voice)',
+        type: ChannelType.GuildVoice,
+        parent: category.id
+      }).catch(() => undefined);
+    }
+
+    // 6. Buat atau temukan Role "🧘 In Focus"
+    let focusRole = guild.roles.cache.find(r => r.name.toLowerCase().includes('in focus'));
+    if (!focusRole) {
+      focusRole = await guild.roles.create({
+        name: '🧘 In Focus',
+        color: '#9B59B6',
+        hoist: true,
+        reason: 'Role status untuk member yang sedang dalam sesi fokus (Do Not Disturb)'
+      }).catch(() => undefined);
+    }
+
+    // 7. Simpan referensi channel ke database Guild
+    await prisma.guild.upsert({
+      where: { discordGuildId: guild.id },
+      update: {
+        name: guild.name,
+        inboxChannelId: inboxChannel.id,
+        radarChannelId: radarChannel.id,
+        focusChannelId: focusChannel.id
+      },
+      create: {
+        discordGuildId: guild.id,
+        name: guild.name,
+        inboxChannelId: inboxChannel.id,
+        radarChannelId: radarChannel.id,
+        focusChannelId: focusChannel.id
+      }
+    });
+
+    // 8. Update atau kirim Panduan di Inbox
     await this.updateInboxGuide(guild, inboxChannel, radarChannel.id);
 
-    // 5. Update atau pasang Live Radar Dashboard di channel radar
+    // 9. Update atau pasang Live Radar Dashboard di channel radar
     await this.updateRadarDashboard(guild);
+
+    // 10. Pasang Focus Hub Guide di channel fokus-room
+    await this.updateFocusHubGuide(guild, focusChannel, voiceChannel?.id);
 
     return {
       category,
       inboxChannel,
-      radarChannel
+      radarChannel,
+      focusChannel,
+      voiceChannel,
+      focusRole
     };
+  }
+
+  /**
+   * Mengirim atau memperbarui Kartu Focus Hub di channel fokus-room
+   */
+  static async updateFocusHubGuide(guild: Guild, focusChannel: TextChannel, voiceChannelId?: string) {
+    try {
+      const voiceMention = voiceChannelId ? `<#${voiceChannelId}>` : '🎧・Focus Room (Voice)';
+
+      const focusHubEmbed = new EmbedBuilder()
+        .setTitle('🎯 TaskFlow Pomodoro Focus Hub')
+        .setDescription(
+          'Selamat datang di **Focus Hub**! Aktifkan sesi fokus untuk menaikkan konsentrasi dan mendapatkan reward produktivitas.\n\n' +
+          '⚡ **Yang Terjadi Saat Kamu Fokus:**\n' +
+          '• 🧘 Kamu mendapatkan status role **`@In Focus`** di server (Do Not Disturb aktif).\n' +
+          '• 📢 Bot mengumumkan sesi fokusmu di channel ini agar tidak ada yang mendistraksi.\n' +
+          '• ☕ Bot otomatis mengirim DM pengingat saat sesi berakhir untuk istirahat sejenak.\n' +
+          '• 🏆 Dapatkan **+25 XP** (25 Menit) atau **+50 XP** (50 Menit) untuk naik level di `/leaderboard`!\n\n' +
+          `🎧 *Tips: Kamu juga bisa bergabung ke channel suara ${voiceMention} untuk belajar bareng sambil mendengarkan musik lo-fi.*`
+        )
+        .setColor('#9B59B6')
+        .setFooter({ text: 'Klik tombol di bawah untuk langsung mengaktifkan sesi fokus!' });
+
+      const focusButtons = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId('room_focus_25')
+          .setLabel('🎯 Fokus 25 Menit (+25 XP)')
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId('room_focus_50')
+          .setLabel('🔥 Deep Work 50 Menit (+50 XP)')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      const recent = await focusChannel.messages.fetch({ limit: 10 }).catch(() => null);
+      const existing = recent?.find(m => m.author.id === guild.client.user.id && m.embeds[0]?.title?.includes('Focus Hub'));
+      if (existing) {
+        await existing.edit({ embeds: [focusHubEmbed], components: [focusButtons] });
+      } else {
+        await focusChannel.send({ embeds: [focusHubEmbed], components: [focusButtons] });
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Gagal update focus hub guide');
+    }
   }
 
   /**
