@@ -136,16 +136,16 @@ client.on('messageCreate', async (message) => {
 
     if (thread) {
       const replyMsg = await message.reply({
-        content: `✅ **Task Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.`
+        content: `✅ **Task Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.\n*(Pesan ini otomatis hilang dalam 2 menit agar channel tetap bersih)*`
       });
-      // Bersihkan notifikasi bot di channel inbox-tugas setelah 15 detik agar tetap bersih
+      // Bersihkan notifikasi bot di channel inbox-tugas setelah 2 menit (120.000 ms) agar chat tetap bersih
       setTimeout(async () => {
         try {
           await replyMsg.delete();
         } catch {
-          // Abaikan jika sudah dihapus
+          // Abaikan jika sudah dihapus secara manual
         }
-      }, 15000);
+      }, 2 * 60 * 1000);
     }
   } catch (err) {
     logger.error({ err }, 'Error in auto-listen inbox');
