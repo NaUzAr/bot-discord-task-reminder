@@ -1,4 +1,4 @@
-import { REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { REST, Routes, SlashCommandBuilder, ContextMenuCommandBuilder, ApplicationCommandType } from 'discord.js';
 import { env } from '../config/env';
 import { logger } from '../shared/utils/logger';
 
@@ -12,8 +12,14 @@ const commands = [
         .setRequired(true)
     ),
   new SlashCommandBuilder()
+    .setName('tasks')
+    .setDescription('Daftar semua tugas aktif kamu & tombol checklist'),
+  new SlashCommandBuilder()
     .setName('today')
-    .setDescription('Lihat tugas-tugas kamu untuk hari ini')
+    .setDescription('Deadline Radar: Lihat tugas-tugas kamu untuk hari ini'),
+  new ContextMenuCommandBuilder()
+    .setName('Add to TaskFlow')
+    .setType(ApplicationCommandType.Message)
 ].map(command => command.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(env.BOT_TOKEN);

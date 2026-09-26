@@ -1,7 +1,7 @@
 import { Worker } from 'bullmq';
 import { env } from '../config/env';
 import { logger } from '../shared/utils/logger';
-import { Client, GatewayIntentBits, EmbedBuilder } from 'discord.js';
+import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { prisma } from '../database/prisma';
 
 // Worker menggunakan client Discord sendiri untuk mengirim DM
@@ -9,6 +9,26 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 client.login(env.BOT_TOKEN);
 
 export const reminderWorker = new Worker('reminder-queue', async (job) => {
+  if (job.name === 'focus-end') {
+    const { userId, durationMinutes } = job.data;
+    try {
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user) return;
+      const discordUser = await client.users.fetch(user.discordId);
+
+      const embed = new EmbedBuilder()
+        .setTitle('🎉 Sesi Fokus Selesai!')
+        .setDescription(`Hebat! Kamu telah menyelesaikan sesi fokus selama **${durationMinutes} menit**.\nIstirahat sejenak 5 menit ya! ☕`)
+        .setColor('#00FF7F')
+        .setTimestamp();
+
+      await discordUser.send({ embeds: [embed] });
+    } catch (err) {
+      logger.error({ err }, 'Gagal mengirim notifikasi focus-end');
+    }
+    return;
+  }
+
   const { taskId, userId, title } = job.data;
   
   logger.info(`Memproses reminder untuk task: ${taskId}`);
@@ -27,18 +47,43 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
     // Ambil object user Discord untuk mengirim Direct Message (DM)
     const discordUser = await client.users.fetch(user.discordId);
     
+    // ActionRow tombol interaktif: Selesai, Tunda 30m, Fokus 25m
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`task_done_${task.id}`)
+        .setLabel('Selesai')
+        .setStyle(ButtonStyle.Success)
+        .setEmoji('✅'),
+      new ButtonBuilder()
+        .setCustomId(`task_snooze_${task.id}_30`)
+        .setLabel('Tunda 30m')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('💤'),
+      new ButtonBuilder()
+        .setCustomId(`task_focus_${task.id}_25`)
+        .setLabel('Fokus 25m')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('🎯')
+    );
+
+    const deadlineInfo = task.dueAt 
+      ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:R> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:F>)`
+      : 'Tidak ada batas waktu';
+
     // Buat tampilan UI Embed yang cantik untuk Discord
     const embed = new EmbedBuilder()
-      .setTitle('⏰ Waktunya Nugas!')
-      .setDescription(`Jangan lupa kerjain: **${task.title}**`)
+      .setTitle('⏰ Waktunya Nugas! (TaskFlow Reminder)')
+      .setDescription(`Jangan lupa kerjakan tugas:\n### **${task.title}**\n\n⏰ **Deadline:** ${deadlineInfo}`)
       .setColor('#FF5733')
       .addFields(
-        { name: 'Prioritas', value: task.priority, inline: true },
-        { name: 'Status', value: task.status, inline: true }
+        { name: 'Prioritas', value: `🔥 ${task.priority}`, inline: true },
+        { name: 'Status', value: `⚪ ${task.status}`, inline: true },
+        { name: 'Estimasi', value: task.estimatedMinutes ? `⏱️ ${task.estimatedMinutes} menit` : 'Tidak ada', inline: true }
       )
+      .setFooter({ text: 'Klik tombol di bawah untuk aksi cepat!' })
       .setTimestamp();
 
-    await discordUser.send({ embeds: [embed] });
+    await discordUser.send({ embeds: [embed], components: [row] });
     
     // Catat riwayat reminder ke database
     await prisma.reminder.create({
