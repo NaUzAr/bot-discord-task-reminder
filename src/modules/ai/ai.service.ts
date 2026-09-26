@@ -189,6 +189,79 @@ Output strictly valid JSON with keys:
     return null;
   }
 
+  static async extractTaskFromAudio(
+    audioBuffer: Buffer,
+    mimeType: string,
+    caption?: string,
+    timezone: string = 'Asia/Jakarta'
+  ): Promise<ExtractedTask | null> {
+    const nowUTC = new Date().toISOString();
+
+    const systemInstruction = `
+You are an intelligent multimodal audio task parsing assistant for TaskFlow Discord Bot.
+Your job is to listen to voice messages or audio recordings in Indonesian or English and extract actionable task details.
+Context:
+- Current Server Time (UTC): ${nowUTC}
+- User Local Timezone: ${timezone}
+
+Rules:
+1. Carefully listen to and transcribe the speech in the audio.
+2. If the user provided a caption, combine it with the voice content.
+3. Extract the core task title.
+4. Determine exact deadline (dueAt) in ISO 8601 UTC format. Calculate from current server time and user timezone. Return null if no deadline is mentioned.
+5. Determine estimated duration in minutes if mentioned. Return null if not found.
+6. Determine priority: strictly "LOW", "MEDIUM", "HIGH", or "URGENT". Default to "MEDIUM".
+7. Extract submission link (linkUrl) if any URL is spoken or written in caption. Return null if not mentioned.
+
+Output strictly valid JSON with keys:
+{
+  "title": string,
+  "dueAt": string | null,
+  "estimatedMinutes": number | null,
+  "priority": "LOW" | "MEDIUM" | "HIGH" | "URGENT",
+  "linkUrl": string | null
+}
+`;
+
+    const audioPart = {
+      inlineData: {
+        data: audioBuffer.toString("base64"),
+        mimeType: mimeType || "audio/ogg"
+      }
+    };
+
+    const promptText = caption && caption.trim().length > 0
+      ? `User caption: "${caption}". Listen to this audio and extract task details.`
+      : "Listen carefully to this voice message and extract task details, title, deadline, and priority.";
+
+    for (const modelName of CANDIDATE_MODELS) {
+      try {
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          systemInstruction,
+          generationConfig: {
+            responseMimeType: "application/json",
+          }
+        });
+
+        const result = await model.generateContent([promptText, audioPart]);
+        const textOutput = result.response.text();
+        if (!textOutput) continue;
+
+        const parsedJSON = JSON.parse(textOutput);
+        const parsed = TaskExtractionSchema.parse(parsedJSON);
+
+        logger.info({ modelName, parsed }, 'Sukses mengekstrak task dari audio/voice note dengan Gemini');
+        return parsed;
+      } catch (error: any) {
+        logger.warn({ model: modelName, err: error?.message || error }, 'Model gagal ekstrak task dari audio, mencoba fallback...');
+      }
+    }
+
+    logger.error('Semua model Gemini gagal mengekstrak task dari audio.');
+    return null;
+  }
+
   static async breakdownTask(taskTitle: string): Promise<string[]> {
     const prompt = `
 Sebagai asisten produktivitas, pecahkan tugas berikut menjadi 4 sampai 5 sub-tugas (actionable checklist) yang konkret, praktis, dan mudah dicicil oleh mahasiswa/pekerja:

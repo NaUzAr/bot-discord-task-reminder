@@ -21,6 +21,9 @@ const commands = [
     .setName('today')
     .setDescription('Deadline Radar: Lihat tugas-tugas kamu untuk hari ini'),
   new SlashCommandBuilder()
+    .setName('week')
+    .setDescription('Weekly Agenda Horizon: Lihat seluruh jadwal tugas 7 hari ke depan'),
+  new SlashCommandBuilder()
     .setName('stats')
     .setDescription('Lihat profil produktivitasmu (XP, Level, Streak, dan Selesai)'),
   new SlashCommandBuilder()

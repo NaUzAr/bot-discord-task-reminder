@@ -1,4 +1,18 @@
-import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, TextChannel, AttachmentBuilder } from 'discord.js';
+import { 
+  Client, 
+  GatewayIntentBits, 
+  EmbedBuilder, 
+  ActionRowBuilder, 
+  ButtonBuilder, 
+  ButtonStyle, 
+  TextChannel, 
+  AttachmentBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder
+} from 'discord.js';
 import { env } from './config/env';
 import { logger } from './shared/utils/logger';
 import { deployCommands } from './bot/deploy-commands';
@@ -79,8 +93,15 @@ client.on('messageCreate', async (message) => {
     // Bersihkan mention <@...> agar caption yang dikirim ke AI tetap bersih
     const cleanContent = message.content.replace(/<@!?\d+>/g, '').trim();
 
-    // 📸 Vision AI: Cek apakah pengguna mengunggah gambar/screenshot
+    // 📸 Vision AI & 🎙️ Voice-to-Task: Cek apakah pengguna mengunggah gambar/screenshot atau voice note/audio
     const imageAttachment = message.attachments.find(att => att.contentType?.startsWith('image/'));
+    const audioAttachment = message.attachments.find(att => 
+      att.contentType?.startsWith('audio/') || 
+      att.name.endsWith('.ogg') || 
+      att.name.endsWith('.mp3') || 
+      att.name.endsWith('.wav') ||
+      att.name.endsWith('.m4a')
+    );
     let extracted = null;
 
     if (imageAttachment) {
@@ -95,6 +116,19 @@ client.on('messageCreate', async (message) => {
         );
       } catch (imgErr) {
         logger.error({ imgErr }, 'Gagal mengunduh atau mengekstrak task dari gambar');
+      }
+    } else if (audioAttachment) {
+      try {
+        const response = await fetch(audioAttachment.url);
+        const arrayBuffer = await response.arrayBuffer();
+        const audioBuffer = Buffer.from(arrayBuffer);
+        extracted = await AIService.extractTaskFromAudio(
+          audioBuffer,
+          audioAttachment.contentType || 'audio/ogg',
+          cleanContent
+        );
+      } catch (audioErr) {
+        logger.error({ audioErr }, 'Gagal mengunduh atau mengekstrak task dari audio/voice note');
       }
     } else {
       extracted = await AIService.extractTask(cleanContent.length >= 3 ? cleanContent : message.content);
@@ -158,12 +192,17 @@ client.on('messageCreate', async (message) => {
       ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)` 
       : 'Tidak ada batas waktu';
 
-    const buttons = [
+    const primaryButtons = [
       new ButtonBuilder()
         .setCustomId(`task_done_${task.id}`)
         .setLabel('Selesai')
         .setStyle(ButtonStyle.Success)
         .setEmoji('✅'),
+      new ButtonBuilder()
+        .setCustomId(`task_edit_${task.id}`)
+        .setLabel('Edit')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('✏️'),
       new ButtonBuilder()
         .setCustomId(`task_breakdown_${task.id}`)
         .setLabel('AI Breakdown')
@@ -176,9 +215,10 @@ client.on('messageCreate', async (message) => {
         .setEmoji('💤')
     ];
 
+    const linkButtons = [];
     if (task.dueAt) {
       const gcalUrl = generateGoogleCalendarUrl(task.title, task.dueAt, task.linkUrl);
-      buttons.push(
+      linkButtons.push(
         new ButtonBuilder()
           .setLabel('Google Calendar')
           .setStyle(ButtonStyle.Link)
@@ -188,7 +228,7 @@ client.on('messageCreate', async (message) => {
     }
 
     if (task.linkUrl) {
-      buttons.push(
+      linkButtons.push(
         new ButtonBuilder()
           .setLabel('Buka Link')
           .setStyle(ButtonStyle.Link)
@@ -197,7 +237,12 @@ client.on('messageCreate', async (message) => {
       );
     }
 
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(buttons);
+    const actionRows: ActionRowBuilder<ButtonBuilder>[] = [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(primaryButtons)
+    ];
+    if (linkButtons.length > 0) {
+      actionRows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(linkButtons));
+    }
 
     const embedColor = isGroup ? '#9B59B6' : '#00E5FF';
     const embedTitle = isGroup 
@@ -228,11 +273,11 @@ client.on('messageCreate', async (message) => {
     }
 
     embed
-      .setFooter({ text: isGroup ? 'Tugas Kelompok • Anggota tim otomatis diundang ke thread & diingatkan!' : 'Klik "AI Breakdown" untuk memecah tugas jadi checklist praktis!' })
+      .setFooter({ text: isGroup ? 'Tugas Kelompok • Anggota tim otomatis diundang ke thread & diingatkan!' : 'Klik "Edit" untuk ubah rincian, atau "AI Breakdown" untuk memecah tugas!' })
       .setTimestamp();
 
     const targetChannel = thread || message.channel;
-    await targetChannel.send({ embeds: [embed], components: [row] });
+    await targetChannel.send({ embeds: [embed], components: actionRows });
 
     if (thread) {
       const groupNote = isGroup ? ` (👥 Anggota: ${mentionedUsers.map(u => `<@${u.id}>`).join(', ')})` : '';
@@ -257,6 +302,49 @@ client.on('messageCreate', async (message) => {
     logger.error({ err }, 'Error in auto-listen inbox');
   }
 });
+
+/**
+ * 🧩 Render kartu checklist subtask interaktif dengan visual progress bar & toggle buttons
+ */
+function renderSubtasksChecklist(task: { title: string }, subtasks: any[]) {
+  const doneCount = subtasks.filter(s => s.status === 'DONE').length;
+  const total = subtasks.length;
+  const percent = total > 0 ? Math.round((doneCount / total) * 100) : 0;
+  const filledBars = Math.round(percent / 10);
+  const progressBar = '█'.repeat(filledBars) + '░'.repeat(10 - filledBars);
+
+  const subtaskLines = subtasks.map((s, idx) => {
+    return s.status === 'DONE'
+      ? `✅ ~~**${idx + 1}.** ${s.title}~~`
+      : `⬜ **${idx + 1}.** ${s.title}`;
+  }).join('\n');
+
+  const breakdownEmbed = new EmbedBuilder()
+    .setTitle(`🧩 Checklist Sub-Tugas: ${task.title}`)
+    .setDescription(
+      `📊 **Progress:** \`[${progressBar}]\` **${percent}%** (${doneCount}/${total} Selesai)\n\n` +
+      subtaskLines +
+      (percent === 100 
+        ? '\n\n🎉 **Luar biasa! Seluruh sub-tugas telah selesai!** (+30 XP)\nTekan tombol `✅ Selesai` di atas jika tugas utama sudah rampung.' 
+        : '\n\n*Klik tombol di bawah untuk mencentang/membatalkan sub-tugas:*')
+    )
+    .setColor(percent === 100 ? '#00FF7F' : '#9B59B6')
+    .setFooter({ text: 'TaskFlow OS • Interactive Subtasks (Tersimpan di DB)' })
+    .setTimestamp();
+
+  const toggleButtons = subtasks.slice(0, 5).map((s, idx) =>
+    new ButtonBuilder()
+      .setCustomId(`subtask_toggle_${s.id}`)
+      .setLabel(`#${idx + 1} ${s.status === 'DONE' ? '↩️ Batal' : '✔️ Centang'}`)
+      .setStyle(s.status === 'DONE' ? ButtonStyle.Secondary : ButtonStyle.Primary)
+  );
+
+  const compRows = toggleButtons.length > 0
+    ? [new ActionRowBuilder<ButtonBuilder>().addComponents(toggleButtons)]
+    : [];
+
+  return { embed: breakdownEmbed, components: compRows };
+}
 
 client.on('interactionCreate', async (interaction) => {
   // 🔘 1. Tangani Interaksi Tombol (Done, Snooze, Focus, Breakdown)
@@ -378,10 +466,10 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // Tombol: AI Task Breakdown
+    // Tombol: AI Task Breakdown (Checklist Interaktif)
     if (customId.startsWith('task_breakdown_')) {
       const taskId = customId.replace('task_breakdown_', '');
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply();
 
       const task = await prisma.task.findUnique({ where: { id: taskId } });
       if (!task) {
@@ -389,19 +477,89 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      const subtaskTitles = await AIService.breakdownTask(task.title);
-      const subtasks = await TaskService.createSubtasks(task.id, subtaskTitles);
+      let subtasks = await TaskService.getSubtasks(task.id);
+      if (subtasks.length === 0) {
+        const subtaskTitles = await AIService.breakdownTask(task.title);
+        subtasks = await TaskService.createSubtasks(task.id, subtaskTitles);
+      }
 
-      const breakdownEmbed = new EmbedBuilder()
-        .setTitle(`🧩 AI Task Breakdown: ${task.title}`)
-        .setDescription(
-          'AI telah memecah tugas ini menjadi langkah-langkah praktis:\n\n' +
-          subtasks.map((s, idx) => `⬜ **${idx + 1}.** ${s.title}`).join('\n')
-        )
-        .setColor('#9B59B6')
-        .setFooter({ text: 'Checklist ini tersimpan di database TaskFlow' });
+      const { embed, components } = renderSubtasksChecklist(task, subtasks);
+      await interaction.editReply({ embeds: [embed], components });
+      return;
+    }
 
-      await interaction.editReply({ embeds: [breakdownEmbed] });
+    // Tombol: Toggle Status Subtask (Checklist Dicentang / Batal)
+    if (customId.startsWith('subtask_toggle_')) {
+      const subtaskId = customId.replace('subtask_toggle_', '');
+      await interaction.deferUpdate();
+
+      const toggled = await TaskService.toggleSubtask(subtaskId);
+      if (!toggled) return;
+
+      if (toggled.status === 'DONE') {
+        await TaskService.addXP(interaction.user.id, 10);
+      }
+
+      const task = await prisma.task.findUnique({ where: { id: toggled.taskId } });
+      if (!task) return;
+
+      const subtasks = await TaskService.getSubtasks(toggled.taskId);
+      const { embed, components } = renderSubtasksChecklist(task, subtasks);
+      await interaction.editReply({ embeds: [embed], components });
+      return;
+    }
+
+    // Tombol: Edit Task (Menampilkan Discord Modal Pop-Up Form)
+    if (customId.startsWith('task_edit_')) {
+      const taskId = customId.replace('task_edit_', '');
+      const task = await prisma.task.findUnique({ where: { id: taskId } });
+      if (!task) {
+        await interaction.reply({ content: '❌ Task tidak ditemukan.', ephemeral: true });
+        return;
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`modal_edit_task_${task.id}`)
+        .setTitle('✏️ Edit Rincian Task');
+
+      const titleInput = new TextInputBuilder()
+        .setCustomId('title')
+        .setLabel('Judul Tugas')
+        .setStyle(TextInputStyle.Short)
+        .setValue(task.title)
+        .setRequired(true);
+
+      const dueInput = new TextInputBuilder()
+        .setCustomId('due')
+        .setLabel('Deadline (Waktu / Kalimat Santai)')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('Contoh: Besok jam 8 malam atau 2026-09-30 20:00')
+        .setValue(task.dueAt ? task.dueAt.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' }) : '')
+        .setRequired(false);
+
+      const priorityInput = new TextInputBuilder()
+        .setCustomId('priority')
+        .setLabel('Prioritas (LOW / MEDIUM / HIGH / URGENT)')
+        .setStyle(TextInputStyle.Short)
+        .setValue(task.priority)
+        .setRequired(false);
+
+      const linkInput = new TextInputBuilder()
+        .setCustomId('linkUrl')
+        .setLabel('Tautan Pengumpulan (URL)')
+        .setStyle(TextInputStyle.Short)
+        .setValue(task.linkUrl || '')
+        .setPlaceholder('https://classroom.google.com/...')
+        .setRequired(false);
+
+      modal.addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(titleInput),
+        new ActionRowBuilder<TextInputBuilder>().addComponents(dueInput),
+        new ActionRowBuilder<TextInputBuilder>().addComponents(priorityInput),
+        new ActionRowBuilder<TextInputBuilder>().addComponents(linkInput)
+      );
+
+      await interaction.showModal(modal);
       return;
     }
 
@@ -449,7 +607,166 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // 🖱️ 2. Tangani Context Menu Command (Klik Kanan Pesan -> Add to TaskFlow)
+  // 📝 2. Tangani Form Pop-Up (Discord Modal Submit)
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId.startsWith('modal_edit_task_')) {
+      const taskId = interaction.customId.replace('modal_edit_task_', '');
+      await interaction.deferReply({ ephemeral: true });
+
+      const newTitle = interaction.fields.getTextInputValue('title');
+      const newDueText = interaction.fields.getTextInputValue('due')?.trim();
+      const newPriorityText = interaction.fields.getTextInputValue('priority')?.toUpperCase().trim() || 'MEDIUM';
+      const newLink = interaction.fields.getTextInputValue('linkUrl')?.trim() || null;
+
+      let dueAtDate: Date | null = null;
+      if (newDueText && newDueText.length > 0) {
+        const parsedAI = await AIService.extractTask(`Tugas ${newDueText}`);
+        if (parsedAI?.dueAt) {
+          dueAtDate = new Date(parsedAI.dueAt);
+        } else {
+          const directD = new Date(newDueText);
+          if (!isNaN(directD.getTime())) dueAtDate = directD;
+        }
+      }
+
+      const priorityEnum = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'].includes(newPriorityText)
+        ? (newPriorityText as any)
+        : 'MEDIUM';
+
+      const updated = await prisma.task.update({
+        where: { id: taskId },
+        data: {
+          title: newTitle,
+          dueAt: dueAtDate,
+          priority: priorityEnum,
+          linkUrl: newLink
+        }
+      });
+
+      // Perbarui Live Radar Dashboard secara realtime
+      if (updated.guildId) {
+        const dbG = await prisma.guild.findUnique({ where: { id: updated.guildId } });
+        if (dbG) await GuildService.updateRadarDashboard(dbG.discordGuildId, client);
+      } else if (interaction.guild) {
+        await GuildService.updateRadarDashboard(interaction.guild);
+      }
+
+      const dlStr = updated.dueAt 
+        ? `<t:${Math.floor(updated.dueAt.getTime() / 1000)}:F>` 
+        : 'Tanpa deadline';
+
+      await interaction.editReply(
+        `✅ **Task Berhasil Diperbarui!**\n\n` +
+        `📌 **Judul:** ${updated.title}\n` +
+        `⏰ **Deadline:** ${dlStr}\n` +
+        `🔥 **Prioritas:** ${updated.priority}` +
+        (updated.linkUrl ? `\n🔗 **Link:** [Klik di sini](${updated.linkUrl})` : '')
+      );
+      return;
+    }
+  }
+
+  // 🔽 3. Tangani Dropdown Filter (StringSelectMenu)
+  if (interaction.isStringSelectMenu()) {
+    if (interaction.customId.startsWith('tasks_filter_')) {
+      const selected = interaction.values[0];
+      await interaction.deferUpdate();
+
+      const discordId = interaction.user.id;
+      let whereClause: any = {
+        OR: [
+          { user: { discordId } },
+          { assignedUserIds: { has: discordId } }
+        ],
+        deletedAt: null
+      };
+
+      if (selected === 'urgent') {
+        whereClause.status = { in: ['TODO', 'IN_PROGRESS'] };
+        whereClause.priority = { in: ['HIGH', 'URGENT'] };
+      } else if (selected === 'group') {
+        whereClause.status = { in: ['TODO', 'IN_PROGRESS'] };
+        whereClause.taskType = 'GROUP';
+      } else if (selected === 'individual') {
+        whereClause.status = { in: ['TODO', 'IN_PROGRESS'] };
+        whereClause.taskType = 'INDIVIDUAL';
+      } else if (selected === 'done') {
+        whereClause.status = 'DONE';
+      } else {
+        whereClause.status = { in: ['TODO', 'IN_PROGRESS'] };
+      }
+
+      const tasks = await prisma.task.findMany({
+        where: whereClause,
+        orderBy: [{ dueAt: 'asc' }, { priority: 'desc' }],
+        take: 10
+      });
+
+      const priorityEmoji: Record<string, string> = { URGENT: '🚨', HIGH: '🔥', MEDIUM: '⚡', LOW: '🌱' };
+      const filterTitles: Record<string, string> = {
+        all: '📋 Semua Tugas Aktif Kamu',
+        urgent: '🔥 Tugas Mendesak & Prioritas Tinggi',
+        group: '👥 Tugas Kelompok Kamu',
+        individual: '👤 Tugas Individu Kamu',
+        done: '✅ Riwayat Tugas yang Selesai'
+      };
+
+      if (tasks.length === 0) {
+        const emptyEmbed = new EmbedBuilder()
+          .setTitle(filterTitles[selected] || '📋 Daftar Tugas')
+          .setColor('#5865F2')
+          .setDescription('Tidak ada tugas pada filter ini. Santai sejenak! ☕');
+        await interaction.editReply({ embeds: [emptyEmbed] });
+        return;
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle(filterTitles[selected] || '📋 Daftar Tugas')
+        .setColor(selected === 'done' ? '#00FF7F' : '#5865F2')
+        .setDescription(
+          tasks.map((t, idx) => {
+            const dl = t.dueAt ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R>` : 'Tanpa deadline';
+            const linkText = t.linkUrl ? ` | 🔗 [Link](${t.linkUrl})` : '';
+            const typeBadge = t.taskType === 'GROUP' ? '👥 [Kelompok]' : '👤 [Individu]';
+            const statusPrefix = t.status === 'DONE' ? '✅ ~~' : `**${idx + 1}.** `;
+            const statusSuffix = t.status === 'DONE' ? '~~' : '';
+            return `${statusPrefix}${typeBadge} ${t.title}${statusSuffix}\n${priorityEmoji[t.priority] || '⚡'} Prioritas: **${t.priority}** | ⏰ Deadline: ${dl}${linkText}`;
+          }).join('\n\n')
+        )
+        .setFooter({ text: 'Gunakan dropdown di bawah untuk mengganti filter' });
+
+      const actionRows: any[] = [];
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId(`tasks_filter_${interaction.user.id}`)
+        .setPlaceholder('🔍 Filter Tampilan Tugas...')
+        .addOptions(
+          new StringSelectMenuOptionBuilder().setLabel('Semua Tugas Aktif').setValue('all').setEmoji('📌').setDefault(selected === 'all'),
+          new StringSelectMenuOptionBuilder().setLabel('Prioritas Tinggi / Mendesak').setValue('urgent').setEmoji('🔥').setDefault(selected === 'urgent'),
+          new StringSelectMenuOptionBuilder().setLabel('Tugas Kelompok Saja').setValue('group').setEmoji('👥').setDefault(selected === 'group'),
+          new StringSelectMenuOptionBuilder().setLabel('Tugas Individu Saja').setValue('individual').setEmoji('👤').setDefault(selected === 'individual'),
+          new StringSelectMenuOptionBuilder().setLabel('Riwayat Tugas Selesai').setValue('done').setEmoji('✅').setDefault(selected === 'done')
+        );
+
+      actionRows.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu));
+
+      if (selected !== 'done') {
+        const doneButtons = tasks.slice(0, 5).map((t, i) =>
+          new ButtonBuilder()
+            .setCustomId(`task_done_${t.id}`)
+            .setLabel(`Selesai #${i + 1}`)
+            .setStyle(ButtonStyle.Success)
+        );
+        if (doneButtons.length > 0) {
+          actionRows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(doneButtons));
+        }
+      }
+
+      await interaction.editReply({ embeds: [embed], components: actionRows });
+      return;
+    }
+  }
+
+  // 🖱️ 4. Tangani Context Menu Command (Klik Kanan Pesan -> Add to TaskFlow)
   if (interaction.isMessageContextMenuCommand()) {
     if (interaction.commandName === 'Add to TaskFlow') {
       await interaction.deferReply({ ephemeral: true });
@@ -616,11 +933,6 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const tasks = await TaskService.getUserActiveTasks(interaction.user.id, 10);
 
-      if (tasks.length === 0) {
-        await interaction.editReply('🎉 Yeay! Kamu tidak memiliki tugas aktif saat ini. Waktunya santai!');
-        return;
-      }
-
       const priorityEmoji: Record<string, string> = {
         URGENT: '🚨',
         HIGH: '🔥',
@@ -632,14 +944,31 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle('📋 Daftar Tugas Aktif Kamu')
         .setColor('#5865F2')
         .setDescription(
-          tasks.map((t, idx) => {
-            const dl = t.dueAt ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R>` : 'Tanpa deadline';
-            const linkText = t.linkUrl ? ` | 🔗 [Link](${t.linkUrl})` : '';
-            const typeBadge = t.taskType === 'GROUP' ? '👥 [Kelompok]' : '👤 [Individu]';
-            return `**${idx + 1}. ${typeBadge} ${t.title}**\n${priorityEmoji[t.priority] || '⚡'} Prioritas: **${t.priority}** | ⏰ Deadline: ${dl}${linkText}`;
-          }).join('\n\n')
+          tasks.length === 0
+            ? '🎉 Yeay! Kamu tidak memiliki tugas aktif saat ini. Waktunya santai!'
+            : tasks.map((t, idx) => {
+                const dl = t.dueAt ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R>` : 'Tanpa deadline';
+                const linkText = t.linkUrl ? ` | 🔗 [Link](${t.linkUrl})` : '';
+                const typeBadge = t.taskType === 'GROUP' ? '👥 [Kelompok]' : '👤 [Individu]';
+                return `**${idx + 1}. ${typeBadge} ${t.title}**\n${priorityEmoji[t.priority] || '⚡'} Prioritas: **${t.priority}** | ⏰ Deadline: ${dl}${linkText}`;
+              }).join('\n\n')
         )
-        .setFooter({ text: 'Klik tombol di bawah untuk menyelesaikan tugas' });
+        .setFooter({ text: 'Gunakan dropdown di bawah untuk memfilter tampilan tugas' });
+
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId(`tasks_filter_${interaction.user.id}`)
+        .setPlaceholder('🔍 Filter Tampilan Tugas...')
+        .addOptions(
+          new StringSelectMenuOptionBuilder().setLabel('Semua Tugas Aktif').setValue('all').setEmoji('📌').setDefault(true),
+          new StringSelectMenuOptionBuilder().setLabel('Prioritas Tinggi / Mendesak').setValue('urgent').setEmoji('🔥'),
+          new StringSelectMenuOptionBuilder().setLabel('Tugas Kelompok Saja').setValue('group').setEmoji('👥'),
+          new StringSelectMenuOptionBuilder().setLabel('Tugas Individu Saja').setValue('individual').setEmoji('👤'),
+          new StringSelectMenuOptionBuilder().setLabel('Riwayat Tugas Selesai').setValue('done').setEmoji('✅')
+        );
+
+      const rows: any[] = [
+        new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu)
+      ];
 
       const buttons = tasks.slice(0, 5).map((t, i) =>
         new ButtonBuilder()
@@ -648,7 +977,6 @@ client.on('interactionCreate', async (interaction) => {
           .setStyle(ButtonStyle.Success)
       );
 
-      const rows = [];
       if (buttons.length > 0) {
         rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(buttons));
       }
@@ -702,6 +1030,105 @@ client.on('interactionCreate', async (interaction) => {
     } catch (err) {
       logger.error({ err }, 'Gagal mengambil data today');
       await interaction.editReply('❌ Gagal mengambil data.');
+    }
+  }
+
+  if (interaction.commandName === 'week') {
+    await interaction.deferReply({ ephemeral: true });
+
+    try {
+      const now = new Date();
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
+
+      const sevenDaysLater = new Date(startOfToday.getTime() + 7 * 24 * 60 * 60 * 1000);
+      sevenDaysLater.setHours(23, 59, 59, 999);
+
+      const tasks = await prisma.task.findMany({
+        where: {
+          OR: [
+            { user: { discordId: interaction.user.id } },
+            { assignedUserIds: { has: interaction.user.id } },
+            ...(interaction.guildId ? [{ guild: { discordGuildId: interaction.guildId } }] : [])
+          ],
+          status: { in: ['TODO', 'IN_PROGRESS'] },
+          deletedAt: null,
+          dueAt: { lte: sevenDaysLater }
+        },
+        orderBy: { dueAt: 'asc' }
+      });
+
+      if (tasks.length === 0) {
+        await interaction.editReply('🎉 **Tidak ada deadline tugas dalam 7 hari ke depan!** Jadwalmu minggu ini sangat santai.');
+        return;
+      }
+
+      const overdueTasks: typeof tasks = [];
+      const todayTasks: typeof tasks = [];
+      const tomorrowTasks: typeof tasks = [];
+      const upcomingTasks: typeof tasks = [];
+
+      const endOfToday = new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000);
+      const endOfTomorrow = new Date(endOfToday.getTime() + 24 * 60 * 60 * 1000);
+
+      for (const t of tasks) {
+        if (!t.dueAt) continue;
+        if (t.dueAt < now) {
+          overdueTasks.push(t);
+        } else if (t.dueAt < endOfToday) {
+          todayTasks.push(t);
+        } else if (t.dueAt < endOfTomorrow) {
+          tomorrowTasks.push(t);
+        } else {
+          upcomingTasks.push(t);
+        }
+      }
+
+      const priorityEmoji: Record<string, string> = { URGENT: '🚨', HIGH: '🔥', MEDIUM: '⚡', LOW: '🌱' };
+      const formatTask = (t: typeof tasks[0]) => {
+        const typeBadge = t.taskType === 'GROUP' ? '👥' : '👤';
+        const link = t.linkUrl ? ` [🔗](${t.linkUrl})` : '';
+        const dl = t.dueAt ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R>` : '';
+        return `• ${priorityEmoji[t.priority] || '⚡'} ${typeBadge} **${t.title}** (${dl})${link}`;
+      };
+
+      let desc = `🗓️ **Agenda Tugas 7 Hari ke Depan**\nTotal: **${tasks.length} Tugas Terjadwal**\n\n`;
+
+      if (overdueTasks.length > 0) {
+        desc += `⚠️ **LEWAT DEADLINE (${overdueTasks.length})**\n${overdueTasks.map(formatTask).join('\n')}\n\n`;
+      }
+      if (todayTasks.length > 0) {
+        desc += `🔥 **HARI INI (${todayTasks.length})**\n${todayTasks.map(formatTask).join('\n')}\n\n`;
+      }
+      if (tomorrowTasks.length > 0) {
+        desc += `⚡ **BESOK (${tomorrowTasks.length})**\n${tomorrowTasks.map(formatTask).join('\n')}\n\n`;
+      }
+      if (upcomingTasks.length > 0) {
+        desc += `📅 **SISA MINGGU INI (${upcomingTasks.length})**\n${upcomingTasks.map(formatTask).join('\n')}\n\n`;
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle('🗓️ Weekly Task Horizon (7 Hari)')
+        .setDescription(desc)
+        .setColor('#5865F2')
+        .setFooter({ text: 'TaskFlow OS • Pantau beban mingguanmu agar tidak menumpuk!' })
+        .setTimestamp();
+
+      const buttons = tasks.slice(0, 5).map((t, idx) =>
+        new ButtonBuilder()
+          .setCustomId(`task_done_${t.id}`)
+          .setLabel(`Selesai #${idx + 1}`)
+          .setStyle(ButtonStyle.Success)
+      );
+
+      const comp = buttons.length > 0
+        ? [new ActionRowBuilder<ButtonBuilder>().addComponents(buttons)]
+        : [];
+
+      await interaction.editReply({ embeds: [embed], components: comp });
+    } catch (err) {
+      logger.error({ err }, 'Gagal mengambil data /week');
+      await interaction.editReply('❌ Gagal memuat agenda mingguan.');
     }
   }
 
