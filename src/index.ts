@@ -46,6 +46,19 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
+    // Buat Discord Thread otomatis pada pesan pengguna agar channel utama tetap bersih
+    let thread = message.thread;
+    if (!thread) {
+      try {
+        thread = await message.startThread({
+          name: `📌 ${extracted.title.slice(0, 90)}`,
+          autoArchiveDuration: 1440
+        });
+      } catch (threadErr) {
+        logger.warn({ threadErr }, 'Failed to start thread on message');
+      }
+    }
+
     const task = await TaskService.createTaskFromAI(
       message.author.id,
       message.author.username,
@@ -55,7 +68,7 @@ client.on('messageCreate', async (message) => {
         guildName: message.guild.name,
         sourceType: 'INBOX_MESSAGE',
         sourceMessageId: message.id,
-        sourceChannelId: message.channel.id
+        sourceChannelId: thread ? thread.id : message.channel.id
       }
     );
 
@@ -118,17 +131,22 @@ client.on('messageCreate', async (message) => {
       .setFooter({ text: 'Klik "AI Breakdown" untuk memecah tugas ini jadi checklist praktis!' })
       .setTimestamp();
 
-    // Buat Discord Thread otomatis pada pesan pengguna agar channel utama tetap bersih
-    const thread = await message.startThread({
-      name: `📌 ${task.title.slice(0, 90)}`,
-      autoArchiveDuration: 1440
-    });
+    const targetChannel = thread || message.channel;
+    await targetChannel.send({ embeds: [embed], components: [row] });
 
-    await thread.send({ embeds: [embed], components: [row] });
-
-    await message.reply({
-      content: `✅ **Task Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.`
-    });
+    if (thread) {
+      const replyMsg = await message.reply({
+        content: `✅ **Task Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.`
+      });
+      // Bersihkan notifikasi bot di channel inbox-tugas setelah 15 detik agar tetap bersih
+      setTimeout(async () => {
+        try {
+          await replyMsg.delete();
+        } catch {
+          // Abaikan jika sudah dihapus
+        }
+      }, 15000);
+    }
   } catch (err) {
     logger.error({ err }, 'Error in auto-listen inbox');
   }
@@ -150,13 +168,65 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      const isInsideThread = interaction.channel?.isThread();
+
       const doneEmbed = new EmbedBuilder()
         .setTitle('✅ Task Telah Selesai!')
-        .setDescription(`~~${updated.title}~~\n\n🎉 Kerja bagus! Tugas ini telah ditandai selesai (+50 XP) dan reminder dibatalkan.`)
+        .setDescription(
+          `~~${updated.title}~~\n\n🎉 Kerja bagus! Tugas ini telah ditandai selesai (+50 XP) dan reminder dibatalkan.` +
+          (isInsideThread ? '\n\n🗑️ *Thread ini akan otomatis dihapus permanen dalam 3 detik...*' : '')
+        )
         .setColor('#00FF7F')
         .setTimestamp();
 
       await interaction.editReply({ embeds: [doneEmbed], components: [] });
+
+      // Proses hapus thread secara permanen jika tugas memiliki thread terkait
+      const deleteThreadIfExists = async () => {
+        try {
+          let threadToDelete: any = null;
+
+          if (isInsideThread) {
+            threadToDelete = interaction.channel;
+          } else if (updated.sourceChannelId) {
+            const ch = await client.channels.fetch(updated.sourceChannelId).catch(() => null);
+            if (ch?.isThread()) {
+              threadToDelete = ch;
+            } else if (ch && 'threads' in ch && updated.sourceMessageId) {
+              const msg = await (ch as any).messages.fetch(updated.sourceMessageId).catch(() => null);
+              if (msg?.thread) {
+                threadToDelete = msg.thread;
+              }
+            }
+          }
+
+          if (threadToDelete) {
+            if (!isInsideThread) {
+              const closingEmbed = new EmbedBuilder()
+                .setTitle('🗑️ Thread Tugas Selesai')
+                .setDescription('🎉 Tugas ini telah diselesaikan! Thread ini akan dihapus permanen dalam 3 detik...')
+                .setColor('#00FF7F');
+              await threadToDelete.send({ embeds: [closingEmbed] }).catch(() => null);
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            await threadToDelete.delete('Tugas telah diselesaikan oleh user');
+            logger.info(`Thread ${threadToDelete.id} berhasil dihapus permanen karena task ${updated.id} selesai.`);
+
+            // Beri reaksi 🎉 pada pesan sumber di channel utama
+            if (updated.sourceMessageId && threadToDelete.parent) {
+              const sourceMsg = await threadToDelete.parent.messages.fetch(updated.sourceMessageId).catch(() => null);
+              if (sourceMsg) {
+                await sourceMsg.react('🎉').catch(() => null);
+              }
+            }
+          }
+        } catch (err) {
+          logger.warn({ err }, 'Gagal menghapus thread task yang selesai');
+        }
+      };
+
+      deleteThreadIfExists();
       return;
     }
 
