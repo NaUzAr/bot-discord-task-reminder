@@ -6,6 +6,8 @@ import { AIService } from './modules/ai/ai.service';
 import { TaskService } from './modules/task/task.service';
 import { GuildService } from './modules/guild/guild.service';
 import { prisma } from './database/prisma';
+import { generateGoogleCalendarUrl } from './shared/utils/calendar';
+import { BriefingService } from './modules/briefing/briefing.service';
 
 // 🔄 Menyalakan BullMQ Worker secara otomatis saat bot berjalan!
 import './workers/reminder.worker'; 
@@ -34,6 +36,9 @@ client.once('clientReady', async () => {
       if (inboxCh) await GuildService.updateInboxGuide(guild, inboxCh, dbGuild.radarChannelId || undefined);
     }
   }
+
+  // ☀️ Mulai scheduler Daily Morning Briefing (07:00 WIB)
+  BriefingService.startScheduler(client);
 });
 
 // 📥 AUTO-LISTEN: Mendengarkan pesan obrolan di channel inbox-tugas secara otomatis
@@ -44,8 +49,9 @@ client.on('messageCreate', async (message) => {
   const channelName = (message.channel as TextChannel).name?.toLowerCase() || '';
   const isInbox = channelName.includes('inbox') || channelName.includes('tugas');
 
+  const hasAttachment = message.attachments.size > 0;
   if (!isInbox) return;
-  if (message.content.trim().length < 5) return;
+  if (message.content.trim().length < 3 && !hasAttachment) return;
 
   try {
     await message.react('👀');
@@ -56,10 +62,30 @@ client.on('messageCreate', async (message) => {
     const taskType: 'GROUP' | 'INDIVIDUAL' = isGroup ? 'GROUP' : 'INDIVIDUAL';
     const assignedUserIds = [message.author.id, ...Array.from(mentionedUsers.keys())];
 
-    // Bersihkan mention <@...> agar judul yang diekstrak AI tetap bersih dan rapi
+    // Bersihkan mention <@...> agar caption yang dikirim ke AI tetap bersih
     const cleanContent = message.content.replace(/<@!?\d+>/g, '').trim();
 
-    const extracted = await AIService.extractTask(cleanContent.length >= 3 ? cleanContent : message.content);
+    // 📸 Vision AI: Cek apakah pengguna mengunggah gambar/screenshot
+    const imageAttachment = message.attachments.find(att => att.contentType?.startsWith('image/'));
+    let extracted = null;
+
+    if (imageAttachment) {
+      try {
+        const response = await fetch(imageAttachment.url);
+        const arrayBuffer = await response.arrayBuffer();
+        const imageBuffer = Buffer.from(arrayBuffer);
+        extracted = await AIService.extractTaskFromImage(
+          imageBuffer,
+          imageAttachment.contentType || 'image/png',
+          cleanContent
+        );
+      } catch (imgErr) {
+        logger.error({ imgErr }, 'Gagal mengunduh atau mengekstrak task dari gambar');
+      }
+    } else {
+      extracted = await AIService.extractTask(cleanContent.length >= 3 ? cleanContent : message.content);
+    }
+
     if (!extracted) {
       await message.reactions.cache.get('👀')?.users.remove(client.user?.id);
       return;
@@ -126,10 +152,21 @@ client.on('messageCreate', async (message) => {
         .setEmoji('💤')
     ];
 
+    if (task.dueAt) {
+      const gcalUrl = generateGoogleCalendarUrl(task.title, task.dueAt, task.linkUrl);
+      buttons.push(
+        new ButtonBuilder()
+          .setLabel('Google Calendar')
+          .setStyle(ButtonStyle.Link)
+          .setURL(gcalUrl)
+          .setEmoji('📅')
+      );
+    }
+
     if (task.linkUrl) {
       buttons.push(
         new ButtonBuilder()
-          .setLabel('Buka Link Tugas')
+          .setLabel('Buka Link')
           .setStyle(ButtonStyle.Link)
           .setURL(task.linkUrl)
           .setEmoji('🔗')
@@ -662,6 +699,23 @@ client.on('interactionCreate', async (interaction) => {
       .setTimestamp();
 
     await interaction.editReply({ embeds: [embed] });
+  }
+
+  // /briefing - Kirim Morning Briefing langsung ke channel radar sekarang
+  if (interaction.commandName === 'briefing') {
+    await interaction.deferReply({ ephemeral: true });
+    if (!interaction.guild) {
+      await interaction.editReply('❌ Command ini hanya bisa dijalankan di dalam Server (Guild).');
+      return;
+    }
+
+    try {
+      await BriefingService.sendMorningBriefing(client, interaction.guild.id);
+      await interaction.editReply('☀️ **Daily Morning Briefing berhasil dikirimkan ke channel radar server!**');
+    } catch (err) {
+      logger.error({ err }, 'Gagal mengirim briefing via slash command');
+      await interaction.editReply('❌ Terjadi kesalahan saat mengirim briefing.');
+    }
   }
 });
 

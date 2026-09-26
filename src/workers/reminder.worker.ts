@@ -3,6 +3,7 @@ import { env } from '../config/env';
 import { logger } from '../shared/utils/logger';
 import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { prisma } from '../database/prisma';
+import { generateGoogleCalendarUrl } from '../shared/utils/calendar';
 
 // Worker menggunakan client Discord sendiri untuk mengirim DM
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -47,7 +48,7 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
     // Ambil object user Discord untuk mengirim Direct Message (DM)
     const discordUser = await client.users.fetch(user.discordId);
     
-    // ActionRow tombol interaktif: Selesai, Tunda 30m, Fokus 25m
+    // ActionRow tombol interaktif: Selesai, Tunda 30m, Fokus 25m, Google Calendar, Link
     const buttons = [
       new ButtonBuilder()
         .setCustomId(`task_done_${task.id}`)
@@ -66,10 +67,21 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
         .setEmoji('🎯')
     ];
 
+    if (task.dueAt) {
+      const gcalUrl = generateGoogleCalendarUrl(task.title, task.dueAt, task.linkUrl);
+      buttons.push(
+        new ButtonBuilder()
+          .setLabel('Google Calendar')
+          .setStyle(ButtonStyle.Link)
+          .setURL(gcalUrl)
+          .setEmoji('📅')
+      );
+    }
+
     if (task.linkUrl) {
       buttons.push(
         new ButtonBuilder()
-          .setLabel('Buka Link Tugas')
+          .setLabel('Buka Link')
           .setStyle(ButtonStyle.Link)
           .setURL(task.linkUrl)
           .setEmoji('🔗')

@@ -26,6 +26,9 @@ const commands = [
   new SlashCommandBuilder()
     .setName('leaderboard')
     .setDescription('Lihat papan peringkat produktivitas XP & Streak di server ini'),
+  new SlashCommandBuilder()
+    .setName('briefing')
+    .setDescription('Kirim Morning Briefing ringkasan tugas hari ini ke channel radar sekarang'),
   new ContextMenuCommandBuilder()
     .setName('Add to TaskFlow')
     .setType(ApplicationCommandType.Message)

@@ -106,6 +106,89 @@ Output strictly valid JSON with keys:
     return null;
   }
 
+  static async extractTaskFromImage(
+    imageBuffer: Buffer,
+    mimeType: string,
+    caption?: string,
+    timezone: string = 'Asia/Jakarta'
+  ): Promise<ExtractedTask | null> {
+    const nowUTC = new Date().toISOString();
+
+    const systemInstruction = `
+You are an intelligent multimodal vision task parsing assistant for TaskFlow Discord Bot.
+Your job is to read and understand assignment details from images (e.g. presentation slides, WhatsApp chat screenshots, handwritten notes, syllabus, or LMS screenshots) and optional user captions in English or Indonesian.
+Context:
+- Current Server Time (UTC): ${nowUTC}
+- User Local Timezone: ${timezone}
+
+Rules:
+1. Carefully read and OCR all text, instructions, and dates from the image.
+2. If the user provided a caption, use it to understand additional context (e.g. subject name or specific instructions).
+3. Extract the core task title (e.g. "Tugas 3 Kalkulus: Integral Lipat", "Laporan Praktikum Fisika Dasar").
+4. Determine exact deadline (dueAt) in ISO 8601 UTC format. Calculate from current server time and user timezone. Return null if no deadline is found.
+5. Determine estimated duration in minutes if mentioned. Return null if not found.
+6. Determine priority: strictly "LOW", "MEDIUM", "HIGH", or "URGENT". Default to "MEDIUM" (or "HIGH" if deadline is within 24h).
+7. Extract submission link (linkUrl) if any URL is visible in the image or caption. Return null if not mentioned.
+
+Output strictly valid JSON with keys:
+{
+  "title": string,
+  "dueAt": string | null,
+  "estimatedMinutes": number | null,
+  "priority": "LOW" | "MEDIUM" | "HIGH" | "URGENT",
+  "linkUrl": string | null
+}
+`;
+
+    const imagePart = {
+      inlineData: {
+        data: imageBuffer.toString("base64"),
+        mimeType: mimeType || "image/png"
+      }
+    };
+
+    const promptText = caption && caption.trim().length > 0 
+      ? `User caption: "${caption}". Extract the task details from this image and caption.`
+      : "Extract the task details, title, deadline, and links from this image.";
+
+    for (const modelName of CANDIDATE_MODELS) {
+      try {
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          systemInstruction,
+          generationConfig: {
+            responseMimeType: "application/json",
+          }
+        });
+
+        const result = await model.generateContent([promptText, imagePart]);
+        const textOutput = result.response.text();
+        if (!textOutput) continue;
+
+        const parsedJSON = JSON.parse(textOutput);
+        const parsed = TaskExtractionSchema.parse(parsedJSON);
+
+        // Fallback jika ada URL di caption
+        if (!parsed.linkUrl && caption) {
+          const urlMatch = caption.match(/https?:\/\/[^\s<]+[^<.,:;"')\]\s]/);
+          if (urlMatch) {
+            try {
+              parsed.linkUrl = new URL(urlMatch[0]).toString();
+            } catch {}
+          }
+        }
+
+        logger.info({ modelName, parsed }, 'Sukses mengekstrak task dari gambar dengan Gemini Vision');
+        return parsed;
+      } catch (error: any) {
+        logger.warn({ model: modelName, err: error?.message || error }, 'Model gagal ekstrak task dari gambar, mencoba fallback...');
+      }
+    }
+
+    logger.error('Semua model Gemini gagal mengekstrak task dari gambar.');
+    return null;
+  }
+
   static async breakdownTask(taskTitle: string): Promise<string[]> {
     const prompt = `
 Sebagai asisten produktivitas, pecahkan tugas berikut menjadi 4 sampai 5 sub-tugas (actionable checklist) yang konkret, praktis, dan mudah dicicil oleh mahasiswa/pekerja:
