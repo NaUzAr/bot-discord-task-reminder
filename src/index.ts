@@ -211,21 +211,27 @@ client.on('interactionCreate', async (interaction) => {
 
       await interaction.editReply({ embeds: [doneEmbed], components: [] });
 
-      // Proses hapus thread secara permanen jika tugas memiliki thread terkait
+      // Proses hapus thread & pesan asli chat di inbox secara permanen jika tugas selesai
       const deleteThreadIfExists = async () => {
         try {
           let threadToDelete: any = null;
+          let parentChannel: any = null;
 
           if (isInsideThread) {
             threadToDelete = interaction.channel;
+            parentChannel = (interaction.channel as any)?.parent;
           } else if (updated.sourceChannelId) {
             const ch = await client.channels.fetch(updated.sourceChannelId).catch(() => null);
             if (ch?.isThread()) {
               threadToDelete = ch;
-            } else if (ch && 'threads' in ch && updated.sourceMessageId) {
-              const msg = await (ch as any).messages.fetch(updated.sourceMessageId).catch(() => null);
-              if (msg?.thread) {
-                threadToDelete = msg.thread;
+              parentChannel = ch.parent;
+            } else if (ch && 'messages' in ch) {
+              parentChannel = ch;
+              if (updated.sourceMessageId && 'threads' in ch) {
+                const msg = await (ch as any).messages.fetch(updated.sourceMessageId).catch(() => null);
+                if (msg?.thread) {
+                  threadToDelete = msg.thread;
+                }
               }
             }
           }
@@ -242,17 +248,18 @@ client.on('interactionCreate', async (interaction) => {
             await new Promise((resolve) => setTimeout(resolve, 3000));
             await threadToDelete.delete('Tugas telah diselesaikan oleh user');
             logger.info(`Thread ${threadToDelete.id} berhasil dihapus permanen karena task ${updated.id} selesai.`);
+          }
 
-            // Beri reaksi 🎉 pada pesan sumber di channel utama
-            if (updated.sourceMessageId && threadToDelete.parent) {
-              const sourceMsg = await threadToDelete.parent.messages.fetch(updated.sourceMessageId).catch(() => null);
-              if (sourceMsg) {
-                await sourceMsg.react('🎉').catch(() => null);
-              }
+          // Hapus pesan chat asli pengguna di channel utama agar inbox-tugas 100% bersih!
+          if (updated.sourceMessageId && parentChannel) {
+            const sourceMsg = await parentChannel.messages.fetch(updated.sourceMessageId).catch(() => null);
+            if (sourceMsg) {
+              await sourceMsg.delete().catch(() => null);
+              logger.info(`Pesan chat asli ${updated.sourceMessageId} di inbox-tugas berhasil dihapus.`);
             }
           }
         } catch (err) {
-          logger.warn({ err }, 'Gagal menghapus thread task yang selesai');
+          logger.warn({ err }, 'Gagal menghapus thread/pesan task yang selesai');
         }
       };
 
