@@ -37,7 +37,9 @@ model Guild {
   name           String
   
   inboxChannelId       String?
+  inboxGuideMessageId  String?
   radarChannelId       String?
+  radarMessageId       String?
   focusChannelId       String?
   leaderboardChannelId String?
 

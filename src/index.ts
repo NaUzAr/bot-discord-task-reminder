@@ -24,6 +24,16 @@ client.once('clientReady', async () => {
     const guildIds = client.guilds.cache.map(g => g.id);
     await deployCommands(client.user.id, guildIds);
   }
+
+  // Update Live Radar Dashboard & Guide di semua server saat bot online
+  for (const [, guild] of client.guilds.cache) {
+    await GuildService.updateRadarDashboard(guild);
+    const dbGuild = await prisma.guild.findUnique({ where: { discordGuildId: guild.id } });
+    if (dbGuild?.inboxChannelId) {
+      const inboxCh = guild.channels.cache.get(dbGuild.inboxChannelId) as TextChannel | undefined;
+      if (inboxCh) await GuildService.updateInboxGuide(guild, inboxCh, dbGuild.radarChannelId || undefined);
+    }
+  }
 });
 
 // 📥 AUTO-LISTEN: Mendengarkan pesan obrolan di channel inbox-tugas secara otomatis
@@ -177,6 +187,9 @@ client.on('messageCreate', async (message) => {
         }
       }, 2 * 60 * 1000);
     }
+
+    // Perbarui Live Radar Dashboard di channel deadline-radar secara realtime
+    await GuildService.updateRadarDashboard(message.guild);
   } catch (err) {
     logger.error({ err }, 'Error in auto-listen inbox');
   }
@@ -257,6 +270,14 @@ client.on('interactionCreate', async (interaction) => {
               await sourceMsg.delete().catch(() => null);
               logger.info(`Pesan chat asli ${updated.sourceMessageId} di inbox-tugas berhasil dihapus.`);
             }
+          }
+
+          // Perbarui Live Radar Dashboard secara realtime
+          if (updated.guildId) {
+            const dbG = await prisma.guild.findUnique({ where: { id: updated.guildId } });
+            if (dbG) await GuildService.updateRadarDashboard(dbG.discordGuildId, client);
+          } else if (interaction.guild) {
+            await GuildService.updateRadarDashboard(interaction.guild);
           }
         } catch (err) {
           logger.warn({ err }, 'Gagal menghapus thread/pesan task yang selesai');

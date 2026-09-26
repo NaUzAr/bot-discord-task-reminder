@@ -1,4 +1,4 @@
-import { Guild, ChannelType, EmbedBuilder, PermissionFlagsBits, TextChannel } from 'discord.js';
+import { Guild, ChannelType, EmbedBuilder, PermissionFlagsBits, TextChannel, Client } from 'discord.js';
 import { prisma } from '../../database/prisma';
 import { logger } from '../../shared/utils/logger';
 
@@ -30,19 +30,6 @@ export class GuildService {
         parent: category.id,
         topic: 'Ketik tugas/deadline santai di sini. AI TaskFlow akan otomatis mengekstrak & membuat thread checklist!'
       }) as TextChannel;
-
-      // Welcome Card di Inbox
-      const inboxEmbed = new EmbedBuilder()
-        .setTitle('📥 TaskFlow Inbox Aktif!')
-        .setDescription(
-          'Selamat datang di **Task Inbox**! Channel ini khusus untuk mencatat tugas secara instan tanpa command rumit.\n\n' +
-          '💬 **Cukup ketik pesan biasa di sini:**\n' +
-          '> *"Besok jam 8 malam kumpul laporan kalkulus di https://classroom.google.com/"*\n\n' +
-          '⚡ AI otomatis membuat **Thread Rapi** untuk setiap tugas agar channel tetap bersih & tidak spam!'
-        )
-        .setColor('#00E5FF')
-        .setFooter({ text: 'TaskFlow OS • Auto-Listen Powered by Gemini AI' });
-      await inboxChannel.send({ embeds: [inboxEmbed] });
     }
 
     // 3. Buat atau temukan channel 2: 🚨・deadline-radar (READ ONLY untuk member agar bersih)
@@ -55,7 +42,7 @@ export class GuildService {
         name: '🚨・deadline-radar',
         type: ChannelType.GuildText,
         parent: category.id,
-        topic: 'Papan radar deadline tugas server (Read-Only)',
+        topic: 'Papan Live Radar deadline tugas server (Read-Only • Auto-Update Realtime)',
         permissionOverwrites: [
           {
             id: guild.roles.everyone.id,
@@ -67,39 +54,203 @@ export class GuildService {
           }
         ]
       }) as TextChannel;
-
-      // Welcome Card di Radar
-      const radarEmbed = new EmbedBuilder()
-        .setTitle('🚨 Deadline Radar Aktif!')
-        .setDescription(
-          'Channel ini adalah pusat pemantauan tugas bersama di server ini.\n' +
-          'Papan ini bersifat **Read-Only** agar pengumuman tugas selalu bersih dan mudah dibaca!'
-        )
-        .setColor('#FFCC00')
-        .setFooter({ text: 'Ketik /today untuk melihat tugas deadline hari ini' });
-      await radarChannel.send({ embeds: [radarEmbed] });
     }
 
-    // 4. Simpan ke Database
-    await prisma.guild.upsert({
-      where: { discordGuildId: guild.id },
-      update: {
-        name: guild.name,
-        inboxChannelId: inboxChannel.id,
-        radarChannelId: radarChannel.id,
-      },
-      create: {
-        discordGuildId: guild.id,
-        name: guild.name,
-        inboxChannelId: inboxChannel.id,
-        radarChannelId: radarChannel.id,
-      }
-    });
+    // 4. Update atau kirim Panduan di Inbox
+    await this.updateInboxGuide(guild, inboxChannel, radarChannel.id);
+
+    // 5. Update atau pasang Live Radar Dashboard di channel radar
+    await this.updateRadarDashboard(guild);
 
     return {
       category,
       inboxChannel,
       radarChannel
     };
+  }
+
+  /**
+   * Mengirim atau memperbarui Kartu Panduan di channel inbox-tugas
+   */
+  static async updateInboxGuide(guild: Guild, inboxChannel: TextChannel, radarChannelId?: string) {
+    try {
+      const dbGuild = await prisma.guild.findUnique({
+        where: { discordGuildId: guild.id }
+      });
+
+      const radarId = radarChannelId || dbGuild?.radarChannelId;
+      const radarMention = radarId ? `<#${radarId}>` : '🚨・deadline-radar';
+
+      const inboxEmbed = new EmbedBuilder()
+        .setTitle('📥 TaskFlow Inbox (Auto-Listen Aktif)')
+        .setDescription(
+          'Selamat datang di **TaskFlow Inbox**! Channel ini khusus untuk mencatat tugas secara instan tanpa command rumit.\n\n' +
+          '💬 **Cara Menulis Tugas:**\n' +
+          '• 👤 **Tugas Individu:** Ketik tugas biasa tanpa tag orang\n' +
+          '> *"Besok jam 8 malam kumpul laporan kalkulus di https://classroom.google.com/"*\n\n' +
+          '• 👥 **Tugas Kelompok:** Ketik tugas sambil tag teman (@teman)\n' +
+          '> *"Besok jam 8 malam kumpul laporan fisika @Budi @Siti di https://classroom.google.com/"*\n' +
+          '> *(Anggota yang di-tag otomatis diundang ke thread dan diingatkan via DM!)*\n\n' +
+          '⚡ **Fitur Cerdas TaskFlow:**\n' +
+          `• 📊 **Live Radar:** Pantau semua tugas aktif server secara realtime di ${radarMention}!\n` +
+          '• 🧵 **Auto-Thread:** Rincian, checklist AI breakdown, dan tombol selesai ada di thread.\n' +
+          '• 🗑️ **Auto-Clean:** Saat tugas selesai (`✅ Selesai`), thread & chat otomatis lenyap agar channel tetap 100% bersih!'
+        )
+        .setColor('#00E5FF')
+        .setFooter({ text: 'TaskFlow OS • Powered by Gemini AI • Live Auto-Update' });
+
+      let targetMsg = null;
+      if (dbGuild?.inboxGuideMessageId) {
+        targetMsg = await inboxChannel.messages.fetch(dbGuild.inboxGuideMessageId).catch(() => null);
+      }
+
+      if (!targetMsg) {
+        // Cari apakah ada pesan dari bot sebelumnya di inboxChannel
+        const recentMessages = await inboxChannel.messages.fetch({ limit: 10 }).catch(() => null);
+        const botMsg = recentMessages?.find(m => m.author.id === guild.client.user.id);
+        if (botMsg) {
+          targetMsg = botMsg;
+        }
+      }
+
+      if (targetMsg) {
+        await targetMsg.edit({ embeds: [inboxEmbed] });
+        await prisma.guild.upsert({
+          where: { discordGuildId: guild.id },
+          update: { inboxGuideMessageId: targetMsg.id },
+          create: { discordGuildId: guild.id, name: guild.name, inboxGuideMessageId: targetMsg.id }
+        });
+      } else {
+        const sent = await inboxChannel.send({ embeds: [inboxEmbed] });
+        await prisma.guild.upsert({
+          where: { discordGuildId: guild.id },
+          update: { inboxGuideMessageId: sent.id },
+          create: { discordGuildId: guild.id, name: guild.name, inboxGuideMessageId: sent.id }
+        });
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Gagal update inbox guide');
+    }
+  }
+
+  /**
+   * Memperbarui Papan Radar Live (Realtime Dashboard) di channel deadline-radar
+   */
+  static async updateRadarDashboard(guildOrId: Guild | string, clientInstance?: Client) {
+    try {
+      const guildId = typeof guildOrId === 'string' ? guildOrId : guildOrId.id;
+      const dbGuild = await prisma.guild.findUnique({
+        where: { discordGuildId: guildId }
+      });
+
+      if (!dbGuild || !dbGuild.radarChannelId) return;
+
+      const client = (typeof guildOrId !== 'string' ? guildOrId.client : clientInstance);
+      if (!client) return;
+
+      const radarChannel = await client.channels.fetch(dbGuild.radarChannelId).catch(() => null) as TextChannel | null;
+      if (!radarChannel) return;
+
+      // Ambil semua tugas aktif di guild ini
+      const activeTasks = await prisma.task.findMany({
+        where: {
+          guildId: dbGuild.id,
+          status: { in: ['TODO', 'IN_PROGRESS'] },
+          deletedAt: null
+        },
+        orderBy: [
+          { dueAt: 'asc' },
+          { priority: 'desc' }
+        ],
+        take: 15
+      });
+
+      const priorityEmoji: Record<string, string> = {
+        URGENT: '🚨',
+        HIGH: '🔥',
+        MEDIUM: '⚡',
+        LOW: '🌱'
+      };
+
+      const hasUrgent = activeTasks.some(t => t.priority === 'URGENT' || t.priority === 'HIGH');
+      const embedColor = activeTasks.length === 0 ? '#00FF7F' : (hasUrgent ? '#FF3366' : '#FFCC00');
+
+      const radarEmbed = new EmbedBuilder()
+        .setTitle('🚨 Live Deadline Radar Dashboard')
+        .setColor(embedColor)
+        .setTimestamp();
+
+      if (activeTasks.length === 0) {
+        radarEmbed.setDescription(
+          '🎉 **Semua Tugas Telah Selesai!**\n\n' +
+          'Tidak ada deadline aktif yang perlu dikerjakan saat ini. Server dalam kondisi santai! ☕\n\n' +
+          `*Ketik tugas baru di channel <#${dbGuild.inboxChannelId}> untuk otomatis memunculkan tugas di papan ini.*`
+        );
+      } else {
+        const taskEntries = activeTasks.map((t, idx) => {
+          const typeBadge = t.taskType === 'GROUP' ? '👥 [Kelompok]' : '👤 [Individu]';
+          const pEmoji = priorityEmoji[t.priority] || '⚡';
+          const dlText = t.dueAt 
+            ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R> (<t:${Math.floor(t.dueAt.getTime() / 1000)}:F>)` 
+            : 'Tidak ada batas waktu';
+
+          const memberText = (t.taskType === 'GROUP' && t.assignedUserIds?.length > 0)
+            ? t.assignedUserIds.map(id => `<@${id}>`).join(', ')
+            : `<@${t.userId}>`;
+
+          const linkLine = t.linkUrl ? `\n> 🔗 **Tautan:** [Klik untuk Membuka Tugas](${t.linkUrl})` : '';
+
+          return (
+            `**${idx + 1}. ${pEmoji} ${typeBadge} ${t.title}**\n` +
+            `> ⏰ **Deadline:** ${dlText}\n` +
+            `> 👥 **Anggota/Pembuat:** ${memberText}${linkLine}`
+          );
+        });
+
+        radarEmbed.setDescription(
+          `📊 **Total Tugas Aktif:** **${activeTasks.length} Tugas**\n` +
+          `Pusat monitoring tugas server secara real-time. Card ini **otomatis ter-update** setiap ada tugas baru atau tugas selesai!\n\n` +
+          taskEntries.join('\n\n')
+        );
+      }
+
+      radarEmbed.setFooter({ 
+        text: '🔄 Live Auto-Update Realtime • TaskFlow OS',
+      });
+
+      let targetMsg = null;
+      if (dbGuild.radarMessageId) {
+        targetMsg = await radarChannel.messages.fetch(dbGuild.radarMessageId).catch(() => null);
+      }
+
+      if (!targetMsg) {
+        // Cari pesan bot sebelumnya di channel radar
+        const recentMessages = await radarChannel.messages.fetch({ limit: 10 }).catch(() => null);
+        const botMsg = recentMessages?.find(m => m.author.id === client.user?.id);
+        if (botMsg) {
+          targetMsg = botMsg;
+        }
+      }
+
+      if (targetMsg) {
+        await targetMsg.edit({ embeds: [radarEmbed] });
+        if (dbGuild.radarMessageId !== targetMsg.id) {
+          await prisma.guild.update({
+            where: { id: dbGuild.id },
+            data: { radarMessageId: targetMsg.id }
+          });
+        }
+        logger.info(`Radar dashboard message ${targetMsg.id} updated in guild ${guildId}`);
+      } else {
+        const sent = await radarChannel.send({ embeds: [radarEmbed] });
+        await prisma.guild.update({
+          where: { id: dbGuild.id },
+          data: { radarMessageId: sent.id }
+        });
+        logger.info(`New radar dashboard message ${sent.id} sent in guild ${guildId}`);
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Gagal update radar dashboard');
+    }
   }
 }
