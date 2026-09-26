@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: taskflow-bot
+    restart: always
+    env_file:
+      - .env
+    environment:
+      # Override URL agar konek ke container di dalam Docker network
+      - DATABASE_URL=postgresql://taskflow_user:taskflow_password@postgres:5432/taskflow_db?schema=public
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: taskflow-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: taskflow_user
+      POSTGRES_PASSWORD: taskflow_password
+      POSTGRES_DB: taskflow_db
+    ports:
+      # Diekspos ke VPS di port 55432 (bukan default 5432) untuk keamanan
+      - '55432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskflow_user -d taskflow_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: taskflow-redis
+    restart: always
+    ports:
+      # Diekspos ke VPS di port 56379 (bukan default 6379)
+      - '56379:6379'
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:

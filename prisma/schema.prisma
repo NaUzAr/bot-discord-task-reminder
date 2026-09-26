@@ -1,0 +1,168 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  discordId String   @unique
+  username  String
+  timezone  String   @default("Asia/Jakarta")
+  
+  tasks         Task[]
+  reminders     Reminder[]
+  focusSessions FocusSession[]
+  activityLogs  ActivityLog[]
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+model Guild {
+  id             String   @id @default(cuid())
+  discordGuildId String   @unique
+  name           String
+  createdAt      DateTime @default(now())
+  
+  tasks Task[]
+
+  @@map("guilds")
+}
+
+model Task {
+  id        String   @id @default(cuid())
+  userId    String
+  guildId   String?
+  projectId String?
+  courseId  String?
+
+  title       String
+  description String?
+
+  status   TaskStatus @default(TODO)
+  priority Priority   @default(MEDIUM)
+
+  startAt DateTime?
+  dueAt   DateTime?
+
+  estimatedMinutes Int?
+  actualMinutes    Int?
+
+  sourceType      String?
+  sourceMessageId String?
+  sourceChannelId String?
+
+  recurringRule String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+  deletedAt   DateTime? // Soft delete
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  guild Guild? @relation(fields: [guildId], references: [id], onDelete: SetNull)
+  
+  reminders Reminder[]
+  subtasks  Subtask[]
+
+  @@index([userId, status, dueAt])
+  @@map("tasks")
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  WAITING
+  BLOCKED
+  DONE
+  OVERDUE
+  CANCELLED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Subtask {
+  id       String     @id @default(cuid())
+  taskId   String
+  title    String
+  status   TaskStatus @default(TODO)
+  position Int        @default(0)
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@map("subtasks")
+}
+
+model Reminder {
+  id     String @id @default(cuid())
+  taskId String
+  userId String
+
+  reminderAt DateTime
+  status     ReminderStatus @default(PENDING)
+
+  deliveryType      String @default("DM")
+  deliveryChannelId String?
+
+  sentAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, reminderAt])
+  @@map("reminders")
+}
+
+enum ReminderStatus {
+  PENDING
+  SENT
+  FAILED
+  CANCELLED
+}
+
+model FocusSession {
+  id     String @id @default(cuid())
+  taskId String?
+  userId String
+
+  startedAt       DateTime
+  endedAt         DateTime?
+  durationMinutes Int?
+  interruptions   Int @default(0)
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("focus_sessions")
+}
+
+model ActivityLog {
+  id     String @id @default(cuid())
+  userId String
+  taskId String?
+
+  eventType String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("activity_logs")
+}
