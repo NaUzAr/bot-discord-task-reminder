@@ -41,7 +41,7 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
       return;
     }
 
-    const user = await prisma.user.findUnique({ where: { id: task.userId } });
+    const user = await prisma.user.findUnique({ where: { id: userId || task.userId } });
     if (!user) return;
 
     // Ambil object user Discord untuk mengirim Direct Message (DM)
@@ -82,15 +82,17 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
       ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:R> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:F>)`
       : 'Tidak ada batas waktu';
 
+    const isGroup = task.taskType === 'GROUP';
+
     // Buat tampilan UI Embed yang cantik untuk Discord
     const embed = new EmbedBuilder()
-      .setTitle('⏰ Waktunya Nugas! (TaskFlow Reminder)')
-      .setDescription(`Jangan lupa kerjakan tugas:\n### **${task.title}**\n\n⏰ **Deadline:** ${deadlineInfo}`)
-      .setColor('#FF5733')
+      .setTitle(isGroup ? '👥 Waktunya Nugas Bareng! (Reminder Kelompok)' : '⏰ Waktunya Nugas! (TaskFlow Reminder)')
+      .setDescription(`Jangan lupa kerjakan tugas ${isGroup ? 'kelompok' : ''}:\n### **${task.title}**\n\n⏰ **Deadline:** ${deadlineInfo}`)
+      .setColor(isGroup ? '#9B59B6' : '#FF5733')
       .addFields(
+        { name: 'Tipe', value: isGroup ? '👥 Kelompok' : '👤 Individu', inline: true },
         { name: 'Prioritas', value: `🔥 ${task.priority}`, inline: true },
-        { name: 'Status', value: `⚪ ${task.status}`, inline: true },
-        { name: 'Estimasi', value: task.estimatedMinutes ? `⏱️ ${task.estimatedMinutes} menit` : 'Tidak ada', inline: true }
+        { name: 'Status', value: `⚪ ${task.status}`, inline: true }
       );
 
     if (task.linkUrl) {

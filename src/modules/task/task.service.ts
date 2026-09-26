@@ -32,6 +32,8 @@ export class TaskService {
       sourceType?: string;
       sourceMessageId?: string;
       sourceChannelId?: string;
+      taskType?: 'INDIVIDUAL' | 'GROUP';
+      assignedUserIds?: string[];
     }
   ): Promise<Task> {
     const user = await this.getOrCreateUser(discordId, username);
@@ -43,6 +45,8 @@ export class TaskService {
     }
 
     const dueAtDate = extracted.dueAt ? new Date(extracted.dueAt) : null;
+    const taskType = metadata?.taskType || 'INDIVIDUAL';
+    const assignedUserIds = metadata?.assignedUserIds || [discordId];
 
     // 1. Simpan Task ke Database
     const task = await prisma.task.create({
@@ -57,7 +61,9 @@ export class TaskService {
         status: 'TODO',
         sourceType: metadata?.sourceType,
         sourceMessageId: metadata?.sourceMessageId,
-        sourceChannelId: metadata?.sourceChannelId
+        sourceChannelId: metadata?.sourceChannelId,
+        taskType,
+        assignedUserIds
       }
     });
 
@@ -71,16 +77,20 @@ export class TaskService {
       const effectiveDelay = delay > 0 ? delay : Math.max(0, dueAtDate.getTime() - Date.now() - 5 * 60 * 1000);
 
       if (effectiveDelay > 0) {
-        await reminderQueue.add('send-reminder', {
-          taskId: task.id,
-          userId: user.id,
-          title: task.title,
-          linkUrl: task.linkUrl
-        }, {
-          delay: effectiveDelay,
-          jobId: `reminder_${task.id}`
-        });
-        logger.info(`Reminder dijadwalkan untuk task ${task.id} dalam ${effectiveDelay}ms`);
+        for (const mDiscordId of assignedUserIds) {
+          const memberUser = await this.getOrCreateUser(mDiscordId, mDiscordId === discordId ? username : 'GroupMember');
+          await reminderQueue.add('send-reminder', {
+            taskId: task.id,
+            userId: memberUser.id,
+            title: task.title,
+            linkUrl: task.linkUrl,
+            taskType
+          }, {
+            delay: effectiveDelay,
+            jobId: `reminder_${task.id}_${memberUser.id}`
+          });
+        }
+        logger.info(`Reminder dijadwalkan untuk task ${task.id} (${taskType}) kepada ${assignedUserIds.length} anggota`);
       }
     }
 
@@ -90,7 +100,7 @@ export class TaskService {
         userId: user.id,
         taskId: task.id,
         eventType: 'TASK_CREATED',
-        metadata: { title: task.title, dueAt: task.dueAt, priority: task.priority }
+        metadata: { title: task.title, dueAt: task.dueAt, priority: task.priority, taskType }
       }
     });
 
@@ -109,13 +119,17 @@ export class TaskService {
       }
     });
 
-    // Batalkan scheduled reminder job jika masih ada di BullMQ
+    // Batalkan scheduled reminder jobs jika masih ada di BullMQ
     try {
-      const job = await reminderQueue.getJob(`reminder_${taskId}`);
-      if (job) {
-        await job.remove();
-        logger.info(`Scheduled reminder job for task ${taskId} removed.`);
+      const assignedIds = task.assignedUserIds || [];
+      const userIdsToCancel = [task.userId, ...assignedIds];
+      for (const uId of userIdsToCancel) {
+        const job = await reminderQueue.getJob(`reminder_${taskId}_${uId}`);
+        if (job) await job.remove();
       }
+      const defaultJob = await reminderQueue.getJob(`reminder_${taskId}`);
+      if (defaultJob) await defaultJob.remove();
+      logger.info(`Scheduled reminder job for task ${taskId} removed.`);
     } catch (err) {
       logger.warn({ err }, `Could not remove reminder job for task ${taskId}`);
     }
@@ -316,7 +330,10 @@ export class TaskService {
   static async getUserActiveTasks(discordId: string, limit: number = 10) {
     return prisma.task.findMany({
       where: {
-        user: { discordId },
+        OR: [
+          { user: { discordId } },
+          { assignedUserIds: { has: discordId } }
+        ],
         status: { in: ['TODO', 'IN_PROGRESS'] },
         deletedAt: null
       },

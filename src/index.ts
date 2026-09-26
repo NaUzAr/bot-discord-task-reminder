@@ -40,22 +40,39 @@ client.on('messageCreate', async (message) => {
   try {
     await message.react('👀');
 
-    const extracted = await AIService.extractTask(message.content);
+    // 👥 Deteksi anggota yang di-tag (Tugas Kelompok vs Individu)
+    const mentionedUsers = message.mentions.users.filter(u => !u.bot && u.id !== message.author.id);
+    const isGroup = mentionedUsers.size > 0;
+    const taskType: 'GROUP' | 'INDIVIDUAL' = isGroup ? 'GROUP' : 'INDIVIDUAL';
+    const assignedUserIds = [message.author.id, ...Array.from(mentionedUsers.keys())];
+
+    // Bersihkan mention <@...> agar judul yang diekstrak AI tetap bersih dan rapi
+    const cleanContent = message.content.replace(/<@!?\d+>/g, '').trim();
+
+    const extracted = await AIService.extractTask(cleanContent.length >= 3 ? cleanContent : message.content);
     if (!extracted) {
       await message.reactions.cache.get('👀')?.users.remove(client.user?.id);
       return;
     }
 
-    // Buat Discord Thread otomatis pada pesan pengguna agar channel utama tetap bersih
+    // Buat Discord Thread otomatis dengan badge pembeda
+    const threadPrefix = isGroup ? '👥 [Kelompok]' : '👤 [Individu]';
     let thread = message.thread;
     if (!thread) {
       try {
         thread = await message.startThread({
-          name: `📌 ${extracted.title.slice(0, 90)}`,
+          name: `${threadPrefix} ${extracted.title.slice(0, 80)}`,
           autoArchiveDuration: 1440
         });
       } catch (threadErr) {
         logger.warn({ threadErr }, 'Failed to start thread on message');
+      }
+    }
+
+    // Jika tugas kelompok, masukkan semua anggota yang di-tag ke dalam thread
+    if (thread && isGroup) {
+      for (const [userId] of mentionedUsers) {
+        await thread.members.add(userId).catch(() => null);
       }
     }
 
@@ -68,7 +85,9 @@ client.on('messageCreate', async (message) => {
         guildName: message.guild.name,
         sourceType: 'INBOX_MESSAGE',
         sourceMessageId: message.id,
-        sourceChannelId: thread ? thread.id : message.channel.id
+        sourceChannelId: thread ? thread.id : message.channel.id,
+        taskType,
+        assignedUserIds
       }
     );
 
@@ -109,15 +128,25 @@ client.on('messageCreate', async (message) => {
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(buttons);
 
+    const embedColor = isGroup ? '#9B59B6' : '#00E5FF';
+    const embedTitle = isGroup 
+      ? '👥 Task Kelompok Terdeteksi dari Inbox!' 
+      : '👤 Task Individu Terdeteksi dari Inbox!';
+
+    const memberListText = isGroup
+      ? assignedUserIds.map(id => `<@${id}>`).join(', ')
+      : `<@${message.author.id}>`;
+
     const embed = new EmbedBuilder()
-      .setTitle('📌 Task Otomatis Terdeteksi dari Inbox!')
+      .setTitle(embedTitle)
       .setDescription(
         `### **${task.title}**\n\n` +
+        `🏷️ **Tipe:** **${isGroup ? '👥 Tugas Kelompok' : '👤 Tugas Individu'}**\n` +
+        `👥 **Anggota:** ${memberListText}\n` +
         `⏰ **Deadline:** ${deadlineText}\n` +
-        `🔥 **Prioritas:** ${task.priority}\n` +
-        `👤 **Pembuat:** <@${message.author.id}>`
+        `🔥 **Prioritas:** ${task.priority}`
       )
-      .setColor('#00E5FF');
+      .setColor(embedColor);
 
     if (task.linkUrl) {
       embed.addFields({
@@ -128,15 +157,16 @@ client.on('messageCreate', async (message) => {
     }
 
     embed
-      .setFooter({ text: 'Klik "AI Breakdown" untuk memecah tugas ini jadi checklist praktis!' })
+      .setFooter({ text: isGroup ? 'Tugas Kelompok • Anggota tim otomatis diundang ke thread & diingatkan!' : 'Klik "AI Breakdown" untuk memecah tugas jadi checklist praktis!' })
       .setTimestamp();
 
     const targetChannel = thread || message.channel;
     await targetChannel.send({ embeds: [embed], components: [row] });
 
     if (thread) {
+      const groupNote = isGroup ? ` (👥 Anggota: ${mentionedUsers.map(u => `<@${u.id}>`).join(', ')})` : '';
       const replyMsg = await message.reply({
-        content: `✅ **Task Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.\n*(Pesan ini otomatis hilang dalam 2 menit agar channel tetap bersih)*`
+        content: `✅ **Task ${isGroup ? 'Kelompok' : 'Individu'} Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.${groupNote}\n*(Pesan ini otomatis hilang dalam 2 menit agar channel tetap bersih)*`
       });
       // Bersihkan notifikasi bot di channel inbox-tugas setelah 2 menit (120.000 ms) agar chat tetap bersih
       setTimeout(async () => {
@@ -487,7 +517,8 @@ client.on('interactionCreate', async (interaction) => {
           tasks.map((t, idx) => {
             const dl = t.dueAt ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R>` : 'Tanpa deadline';
             const linkText = t.linkUrl ? ` | 🔗 [Link](${t.linkUrl})` : '';
-            return `**${idx + 1}. ${t.title}**\n${priorityEmoji[t.priority] || '⚡'} Prioritas: **${t.priority}** | ⏰ Deadline: ${dl}${linkText}`;
+            const typeBadge = t.taskType === 'GROUP' ? '👥 [Kelompok]' : '👤 [Individu]';
+            return `**${idx + 1}. ${typeBadge} ${t.title}**\n${priorityEmoji[t.priority] || '⚡'} Prioritas: **${t.priority}** | ⏰ Deadline: ${dl}${linkText}`;
           }).join('\n\n')
         )
         .setFooter({ text: 'Klik tombol di bawah untuk menyelesaikan tugas' });
@@ -523,7 +554,10 @@ client.on('interactionCreate', async (interaction) => {
 
       const tasks = await prisma.task.findMany({
         where: {
-          user: { discordId: interaction.user.id },
+          OR: [
+            { user: { discordId: interaction.user.id } },
+            { assignedUserIds: { has: interaction.user.id } }
+          ],
           dueAt: { gte: startOfDay, lte: endOfDay },
           status: 'TODO'
         },
@@ -541,7 +575,8 @@ client.on('interactionCreate', async (interaction) => {
         .setDescription(
           tasks.map((t, i) => {
             const linkText = t.linkUrl ? ` | 🔗 [Link](${t.linkUrl})` : '';
-            return `**${i + 1}. ${t.title}**\n⏰ <t:${Math.floor(t.dueAt!.getTime() / 1000)}:R> - 🔥 ${t.priority}${linkText}`;
+            const typeBadge = t.taskType === 'GROUP' ? '👥 [Kelompok]' : '👤 [Individu]';
+            return `**${i + 1}. ${typeBadge} ${t.title}**\n⏰ <t:${Math.floor(t.dueAt!.getTime() / 1000)}:R> - 🔥 ${t.priority}${linkText}`;
           }).join('\n\n')
         );
 

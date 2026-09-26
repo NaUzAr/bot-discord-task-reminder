@@ -72,6 +72,9 @@ model Task {
   sourceMessageId String?
   sourceChannelId String?
 
+  taskType        String    @default("INDIVIDUAL") // "INDIVIDUAL" | "GROUP"
+  assignedUserIds String[]  @default([])
+
   recurringRule String?
 
   createdAt   DateTime  @default(now())
