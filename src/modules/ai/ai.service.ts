@@ -31,6 +31,12 @@ export const TaskExtractionSchema = z.object({
     }
     return 'MEDIUM';
   }, z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"])).describe("Priority based on urgency and context."),
+  courseName: z.preprocess((val) => {
+    if (typeof val === 'string' && val.trim().length > 0) {
+      return val.trim();
+    }
+    return null;
+  }, z.string().nullable().optional()).describe("The academic course, subject, or lecture name (e.g. 'Kalkulus', 'Pemrograman Web', 'Sistem Pakar', 'Basis Data', 'AI'). Null if not course-related."),
   linkUrl: z.preprocess((val) => {
     if (!val || typeof val !== 'string') return null;
     try {
@@ -74,10 +80,12 @@ Rules:
 5. Determine estimated duration in minutes as an integer if mentioned (e.g. "2 jam" -> 120, "30 menit" -> 30). Return null if not mentioned.
 6. Guess priority: strictly "LOW", "MEDIUM", "HIGH", or "URGENT". Default to "MEDIUM".
 7. Extract submission link (linkUrl): if user mentions a URL (e.g. https://classroom.google.com/..., Google Drive, LMS, etc.), extract it. Return null if no link is mentioned.
+8. Detect course, subject, or academic lecture name if available (e.g. "Kalkulus", "Pemrograman Web", "Sistem Pakar", "Fisika", "AI", "Statistika", "Basis Data", "Jaringan Komputer"). Return as clean capitalized title (e.g. "Kalkulus"). Return null if not mentioned or not related to a specific course.
 
 Output strictly valid JSON with keys:
 {
   "title": string,
+  "courseName": string | null,
   "description": string | null,
   "subtasks": string[],
   "dueAt": string | null,
@@ -160,10 +168,12 @@ Rules:
 7. Determine estimated duration in minutes if mentioned. Return null if not found.
 8. Determine priority: strictly "LOW", "MEDIUM", "HIGH", or "URGENT". Default to "MEDIUM" (or "HIGH" if deadline is within 24h).
 9. Extract submission link (linkUrl) if any URL is visible in the image or caption. Return null if not mentioned.
+10. Detect course or subject name if visible in the slide/document header or body (e.g. "Kalkulus", "Pemrograman Web", "Sistem Pakar", "Statistika", "AI", "Basis Data"). Return as clean capitalized title (e.g. "Kalkulus"). Return null if not mentioned.
 
 Output strictly valid JSON with keys:
 {
   "title": string,
+  "courseName": string | null,
   "description": string | null,
   "subtasks": string[],
   "dueAt": string | null,
@@ -388,5 +398,114 @@ Instruksi:
       `• **🚀 Lanjutan:** Cicil checklist sub-tugas berikutnya.\n\n` +
       `*Tekan tombol Fokus di bawah untuk langsung mengaktifkan timer!*`;
   }
+
+  /**
+   * ⚠️ AI Workload & Anti-Burnout Advisory
+   * Menganalisis beban waktu tugas hari ini vs kapasitas waktu luang
+   */
+  static async generateWorkloadAdvice(
+    tasks: { title: string; priority: string; dueAt: Date | null; estimatedMinutes: number | null }[],
+    totalMinutes: number,
+    availableMinutes: number = 300 // default 5 jam
+  ): Promise<string> {
+    const hours = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
+    const availHours = Math.floor(availableMinutes / 60);
+
+    const taskList = tasks.map((t, i) => `${i + 1}. "${t.title}" (${t.priority}, est: ${t.estimatedMinutes || 60}m)`).join('\n');
+
+    const prompt = `
+Kamu adalah AI Executive Academic Advisor untuk bot Discord TaskFlow.
+Tugasmu adalah menganalisis beban belajar mahasiswa hari ini dan memberikan saran manajemen energi & waktu yang cerdas dan anti-burnout.
+
+Data Beban Hari Ini:
+- Total Tugas: ${tasks.length} tugas
+- Total Estimasi Waktu Diperlukan: ${hours} Jam ${mins} Menit (${totalMinutes} Menit)
+- Kapasitas Belajar Harian Sehat: ${availHours} Jam (${availableMinutes} Menit)
+- Status: ${totalMinutes > availableMinutes ? '⚠️ OVERLOAD (Beban melebihi kapasitas waktu)' : '✅ MANAGEABLE (Kapasitas cukup)'}
+
+Daftar Tugas:
+${taskList}
+
+Instruksi:
+1. Berikan evaluasi cepat (1-2 kalimat) apakah kondisi ini berisiko membuat burnout.
+2. Jika OVERLOAD: Tentukan strategi eliminasi/penundaan (mana tugas yang HARUS dikerjakan hari ini vs mana yang bisa di-snooze / dicicil besok).
+3. Jika MANAGEABLE: Berikan urutan eksekusi paling efisien (Eat the Frog / Peak Energy hours).
+4. Berikan 1 tips actionable pencegahan prokrastinasi.
+5. Format dalam Markdown Discord yang sangat ringkas, padat, dan memotivasi dengan emoji.
+`;
+
+    for (const modelName of CANDIDATE_MODELS) {
+      try {
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        const text = result.response.text();
+        if (text && text.trim().length > 0) return text.trim();
+      } catch (err: any) {
+        logger.warn({ model: modelName, err: err?.message || err }, 'Gagal generate workload advice, trying fallback...');
+      }
+    }
+
+    if (totalMinutes > availableMinutes) {
+      return `⚠️ **Saran Cepat AI:** Beban belajarmu hari ini (${hours}h ${mins}m) cukup padat. Fokus selesaikan 1-2 tugas prioritas tinggi terlebih dahulu, dan pertimbangkan untuk menunda tugas prioritas rendah ke esok hari agar tidak burnout! ☕`;
+    }
+    return `✅ **Saran Cepat AI:** Beban tugas hari ini aman dan seimbang. Manfaatkan sesi Pomodoro 25 menit untuk menyelesaikan tugas secara bertahap! 🚀`;
+  }
+
+  /**
+   * 📊 AI Weekly Productivity Review & Coaching
+   * Menganalisis performa 7 hari ke belakang dan memberikan rekomendasi kebiasaan belajar
+   */
+  static async generateWeeklyReview(
+    completedTasks: { title: string; priority: string; estimatedMinutes?: number | null }[],
+    overdueTasks: { title: string; priority: string }[],
+    totalFocusMinutes: number,
+    accuracyScore: number
+  ): Promise<string> {
+    const focusHours = (totalFocusMinutes / 60).toFixed(1);
+    const completedList = completedTasks.slice(0, 8).map(t => `- ${t.title} (${t.priority})`).join('\n') || 'Belum ada tugas selesai minggu ini';
+    const overdueList = overdueTasks.slice(0, 5).map(t => `- ${t.title} (${t.priority})`).join('\n') || 'Nihil (Semua beres tepat waktu!)';
+
+    const prompt = `
+Kamu adalah AI Performance & Productivity Coach kelas dunia untuk mahasiswa/pekerja.
+Analisis performa mingguan pengguna selama 7 hari terakhir:
+
+Statistik:
+- Tugas Diselesaikan: ${completedTasks.length} tugas
+- Tugas Terlewat / Overdue: ${overdueTasks.length} tugas
+- Total Waktu Fokus Pomodoro: ${focusHours} Jam (${totalFocusMinutes} Menit)
+- Akurasi Estimasi Waktu: ${accuracyScore}%
+
+Daftar Tugas Selesai:
+${completedList}
+
+Daftar Tugas Overdue / Tertunda:
+${overdueList}
+
+Instruksi:
+1. Berikan apresiasi atau evaluasi jujur tentang kedisiplinan dan ritme belajarnya minggu ini.
+2. Sorot pencapaian positif (misal konsistensi jam fokus atau keberhasilan menuntaskan tugas).
+3. Analisis kelemahan (misal: jika ada tugas tertunda, apa penyebab potensialnya dan bagaimana memperbaikinya).
+4. Berikan "🎯 1 Target Kunci Minggu Depan".
+5. Gunakan bahasa Indonesia yang bersahabat, cerdas, tidak kaku, dan memotivasi. Format dengan Markdown Discord ringkas.
+`;
+
+    for (const modelName of CANDIDATE_MODELS) {
+      try {
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        const text = result.response.text();
+        if (text && text.trim().length > 0) return text.trim();
+      } catch (err: any) {
+        logger.warn({ model: modelName, err: err?.message || err }, 'Gagal generate weekly review, trying fallback...');
+      }
+    }
+
+    return `### 🌟 Evaluasi Produktivitas Mingguan\n\n` +
+      `Kerja bagus minggu ini! Kamu telah menyelesaikan **${completedTasks.length} tugas** dengan total waktu fokus **${focusHours} jam**.\n\n` +
+      `• **💡 Rekomendasi:** Pertahankan ritme belajarmu dengan memecah tugas besar menjadi sub-tugas kecil sejak hari pertama tugas diberikan.\n` +
+      `• **🎯 Target Minggu Depan:** Tingkatkan durasi Deep Work dan selesaikan tugas sebelum H-1 deadline! 🚀`;
+  }
 }
+
 

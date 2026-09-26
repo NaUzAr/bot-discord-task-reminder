@@ -53,6 +53,7 @@ export class TaskService {
       data: {
         userId: user.id,
         guildId: dbGuildId,
+        courseId: extracted.courseName || null,
         title: extracted.title,
         description: extracted.description || null,
         linkUrl: extracted.linkUrl,
@@ -422,4 +423,171 @@ export class TaskService {
       take: limit
     });
   }
+
+  /**
+   * ⚠️ Phase 5: Analisis Beban Kerja Harian (Workload Detection)
+   */
+  static async getWorkloadStats(discordId: string, guildId?: string) {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const endOfTomorrow = new Date(startOfToday.getTime() + 48 * 60 * 60 * 1000);
+    endOfTomorrow.setHours(23, 59, 59, 999);
+
+    const tasks = await prisma.task.findMany({
+      where: {
+        OR: [
+          { user: { discordId } },
+          { assignedUserIds: { has: discordId } }
+        ],
+        status: { in: ['TODO', 'IN_PROGRESS'] },
+        deletedAt: null,
+        dueAt: { lte: endOfTomorrow }
+      },
+      orderBy: [{ dueAt: 'asc' }, { priority: 'desc' }]
+    });
+
+    const totalMinutes = tasks.reduce((acc, t) => acc + (t.estimatedMinutes || 60), 0);
+    const availableMinutes = 300; // Standar 5 jam waktu produktif per hari
+
+    let status: 'LIGHT' | 'MODERATE' | 'HEAVY' | 'OVERLOAD' = 'LIGHT';
+    if (totalMinutes > 360) {
+      status = 'OVERLOAD';
+    } else if (totalMinutes > 240) {
+      status = 'HEAVY';
+    } else if (totalMinutes > 120) {
+      status = 'MODERATE';
+    }
+
+    return {
+      tasks,
+      totalMinutes,
+      availableMinutes,
+      status
+    };
+  }
+
+  /**
+   * 📊 Phase 5: Weekly Productivity Review Data
+   */
+  static async getWeeklyReviewStats(discordId: string) {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const now = new Date();
+
+    const user = await prisma.user.findUnique({
+      where: { discordId },
+      include: {
+        focusSessions: {
+          where: { startedAt: { gte: sevenDaysAgo } }
+        }
+      }
+    });
+
+    if (!user) return null;
+
+    const completedTasks = await prisma.task.findMany({
+      where: {
+        OR: [
+          { user: { discordId } },
+          { assignedUserIds: { has: discordId } }
+        ],
+        status: 'DONE',
+        completedAt: { gte: sevenDaysAgo }
+      },
+      orderBy: { completedAt: 'desc' }
+    });
+
+    const overdueTasks = await prisma.task.findMany({
+      where: {
+        OR: [
+          { user: { discordId } },
+          { assignedUserIds: { has: discordId } }
+        ],
+        status: { in: ['TODO', 'IN_PROGRESS'] },
+        deletedAt: null,
+        dueAt: { lt: now }
+      },
+      orderBy: { dueAt: 'asc' }
+    });
+
+    const totalFocusMinutes = user.focusSessions.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
+
+    // Hitung akurasi estimasi jika ada task yang memiliki actualMinutes dan estimatedMinutes
+    let estimatedSum = 0;
+    let actualSum = 0;
+    for (const t of completedTasks) {
+      if (t.estimatedMinutes) {
+        estimatedSum += t.estimatedMinutes;
+        actualSum += t.actualMinutes || t.estimatedMinutes;
+      }
+    }
+    const accuracyScore = estimatedSum > 0 
+      ? Math.min(100, Math.round((Math.min(estimatedSum, actualSum) / Math.max(estimatedSum, actualSum)) * 100))
+      : 85; // Default score baseline
+
+    return {
+      user,
+      completedTasks,
+      overdueTasks,
+      totalFocusMinutes,
+      accuracyScore
+    };
+  }
+
+  /**
+   * 📚 Phase 6: Mode Mata Kuliah (Course Mode)
+   * Mengambil daftar seluruh mata kuliah di server beserta statistik tugasnya
+   */
+  static async getCoursesWithTasks(discordGuildId: string) {
+    const guild = await prisma.guild.findUnique({
+      where: { discordGuildId }
+    });
+    if (!guild) return [];
+
+    const tasks = await prisma.task.findMany({
+      where: {
+        guildId: guild.id,
+        courseId: { not: null },
+        deletedAt: null
+      }
+    });
+
+    const courseMap = new Map<string, { name: string; total: number; active: number; done: number }>();
+
+    for (const t of tasks) {
+      const cName = t.courseId!;
+      if (!courseMap.has(cName)) {
+        courseMap.set(cName, { name: cName, total: 0, active: 0, done: 0 });
+      }
+      const entry = courseMap.get(cName)!;
+      entry.total += 1;
+      if (t.status === 'DONE') {
+        entry.done += 1;
+      } else {
+        entry.active += 1;
+      }
+    }
+
+    return Array.from(courseMap.values());
+  }
+
+  /**
+   * 📚 Ambil daftar tugas aktif berdasarkan nama mata kuliah
+   */
+  static async getTasksByCourse(discordGuildId: string, courseName: string) {
+    const guild = await prisma.guild.findUnique({
+      where: { discordGuildId }
+    });
+    if (!guild) return [];
+
+    return prisma.task.findMany({
+      where: {
+        guildId: guild.id,
+        courseId: { equals: courseName, mode: 'insensitive' },
+        deletedAt: null
+      },
+      orderBy: [{ status: 'asc' }, { dueAt: 'asc' }]
+    });
+  }
 }
+

@@ -51,6 +51,28 @@ const commands = [
           { name: '👤 Tugas Pribadi Saya Saja', value: 'saya' }
         )
     ),
+  new SlashCommandBuilder()
+    .setName('workload')
+    .setDescription('Deteksi Beban Kerja: Analisis jam tugas hari ini vs kapasitas & alert burnout'),
+  new SlashCommandBuilder()
+    .setName('review')
+    .setDescription('Weekly Productivity Review: Laporan 7 hari, jam fokus Pomodoro & AI Coaching'),
+  new SlashCommandBuilder()
+    .setName('course')
+    .setDescription('Mode Mata Kuliah: Pantau tugas terkelompok per matkul & progress bar')
+    .addSubcommand(sub =>
+      sub.setName('list')
+        .setDescription('Lihat seluruh mata kuliah aktif di server beserta persentase selesai')
+    )
+    .addSubcommand(sub =>
+      sub.setName('tasks')
+        .setDescription('Lihat seluruh tugas untuk mata kuliah tertentu')
+        .addStringOption(opt =>
+          opt.setName('nama')
+            .setDescription('Nama mata kuliah (contoh: Kalkulus, Pemrograman Web)')
+            .setRequired(true)
+        )
+    ),
   new ContextMenuCommandBuilder()
     .setName('Add to TaskFlow')
     .setType(ApplicationCommandType.Message)

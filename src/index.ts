@@ -150,17 +150,45 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // Buat Discord Thread otomatis dengan badge pembeda
-    const threadPrefix = isGroup ? '👥 [Kelompok]' : '👤 [Individu]';
+    // 📚 Smart Thread Grouping: Cek apakah tugas berkaitan dengan Mata Kuliah tertentu
     let thread = message.thread;
+    let isReusedThread = false;
+
     if (!thread) {
-      try {
-        thread = await message.startThread({
-          name: `${threadPrefix} ${extracted.title.slice(0, 80)}`,
-          autoArchiveDuration: 1440
-        });
-      } catch (threadErr) {
-        logger.warn({ threadErr }, 'Failed to start thread on message');
+      // 1. Jika terdeteksi nama mata kuliah, cari apakah sudah ada thread aktif untuk mata kuliah ini di channel
+      if (extracted.courseName && message.channel.isTextBased() && 'threads' in message.channel) {
+        try {
+          const activeThreads = await (message.channel as TextChannel).threads.fetchActive().catch(() => null);
+          if (activeThreads) {
+            const courseLower = extracted.courseName.toLowerCase();
+            const existingCourseThread = activeThreads.threads.find(th => 
+              th.name.toLowerCase().includes(courseLower)
+            );
+            if (existingCourseThread && !existingCourseThread.archived) {
+              thread = existingCourseThread;
+              isReusedThread = true;
+              logger.info(`Reusing existing course thread: ${thread.name} (${thread.id}) for course: ${extracted.courseName}`);
+            }
+          }
+        } catch (fetchThreadErr) {
+          logger.warn({ fetchThreadErr }, 'Gagal fetch active threads for course');
+        }
+      }
+
+      // 2. Jika belum ada thread untuk mata kuliah ini, buat thread baru dengan nama mata kuliah
+      if (!thread) {
+        try {
+          const threadName = extracted.courseName 
+            ? `📚・${extracted.courseName}`
+            : `${isGroup ? '👥 [Kelompok]' : '👤 [Individu]'} ${extracted.title.slice(0, 75)}`;
+
+          thread = await message.startThread({
+            name: threadName,
+            autoArchiveDuration: 1440
+          });
+        } catch (threadErr) {
+          logger.warn({ threadErr }, 'Failed to start thread on message');
+        }
       }
     }
 
@@ -299,8 +327,12 @@ client.on('messageCreate', async (message) => {
 
     if (thread) {
       const groupNote = isGroup ? ` (👥 Anggota: ${mentionedUsers.map(u => `<@${u.id}>`).join(', ')})` : '';
+      const replyContent = isReusedThread
+        ? `✅ **Tugas Baru Dicatat!** Tugas untuk **${extracted.courseName}** digabungkan ke thread mata kuliah: <#${thread.id}>.${groupNote}\n*(Pesan input & notifikasi ini otomatis terhapus dalam 10 detik agar inbox tetap bersih)*`
+        : `✅ **Task ${isGroup ? 'Kelompok' : 'Individu'} Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.${groupNote}\n*(Pesan input & notifikasi ini otomatis terhapus dalam 10 detik agar inbox tetap bersih)*`;
+
       const replyMsg = await message.reply({
-        content: `✅ **Task ${isGroup ? 'Kelompok' : 'Individu'} Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.${groupNote}\n*(Pesan input & notifikasi ini otomatis terhapus dalam 10 detik agar inbox tetap bersih)*`
+        content: replyContent
       }).catch(() => null);
 
       // Bersihkan notifikasi bot & pesan input asli user di inbox-tugas setelah 10 detik (10.000 ms) agar inbox selalu 100% bersih!
@@ -386,18 +418,43 @@ client.on('interactionCreate', async (interaction) => {
 
       const isInsideThread = interaction.channel?.isThread();
 
+      // Cek apakah masih ada tugas aktif lain di thread ini!
+      let remainingInThread = 0;
+      let threadObj: any = null;
+      if (isInsideThread) {
+        threadObj = interaction.channel;
+      } else if (updated.sourceChannelId) {
+        const ch = await client.channels.fetch(updated.sourceChannelId).catch(() => null);
+        if (ch?.isThread()) threadObj = ch;
+      }
+
+      if (threadObj) {
+        remainingInThread = await prisma.task.count({
+          where: {
+            sourceChannelId: threadObj.id,
+            status: { in: ['TODO', 'IN_PROGRESS'] },
+            id: { not: updated.id },
+            deletedAt: null
+          }
+        });
+      }
+
+      const threadNote = remainingInThread > 0
+        ? `\n\n📌 *Masih ada ${remainingInThread} tugas aktif lagi di thread mata kuliah ini. Thread tetap dibuka!*`
+        : (isInsideThread ? '\n\n🗑️ *Seluruh tugas di thread ini telah tuntas. Thread akan otomatis dihapus permanen dalam 3 detik...*' : '');
+
       const doneEmbed = new EmbedBuilder()
         .setTitle('✅ Task Telah Selesai!')
         .setDescription(
           `~~${updated.title}~~\n\n🎉 Kerja bagus! Tugas ini telah ditandai selesai (+50 XP) dan reminder dibatalkan.` +
-          (isInsideThread ? '\n\n🗑️ *Thread ini akan otomatis dihapus permanen dalam 3 detik...*' : '')
+          threadNote
         )
         .setColor('#00FF7F')
         .setTimestamp();
 
       await interaction.editReply({ embeds: [doneEmbed], components: [] });
 
-      // Proses hapus thread & pesan asli chat di inbox secara permanen jika tugas selesai
+      // Proses hapus thread & pesan asli chat di inbox jika seluruh tugas di thread selesai
       const deleteThreadIfExists = async () => {
         try {
           let threadToDelete: any = null;
@@ -430,8 +487,8 @@ client.on('interactionCreate', async (interaction) => {
             }
           }
 
-          // 1. Bersihkan pesan chat & notifikasi bot di inbox-tugas secara menyeluruh
-          if (parentChannelId) {
+          // 1. Bersihkan pesan chat & notifikasi bot di inbox-tugas jika tidak ada tugas tersisa
+          if (parentChannelId && remainingInThread === 0) {
             const parentChannel = await client.channels.fetch(parentChannelId).catch(() => null);
             if (parentChannel && 'messages' in parentChannel) {
               try {
@@ -458,19 +515,29 @@ client.on('interactionCreate', async (interaction) => {
             }
           }
 
-          // 2. Beri pesan penutup di thread lalu hapus thread secara permanen
+          // 2. Beri pesan penutup di thread lalu hapus thread jika semua tugas selesai
           if (threadToDelete) {
-            if (!isInsideThread) {
-              const closingEmbed = new EmbedBuilder()
-                .setTitle('🗑️ Thread Tugas Selesai')
-                .setDescription('🎉 Tugas ini telah diselesaikan! Thread ini akan dihapus permanen dalam 3 detik...')
-                .setColor('#00FF7F');
-              await threadToDelete.send({ embeds: [closingEmbed] }).catch(() => null);
-            }
+            if (remainingInThread > 0) {
+              const keepEmbed = new EmbedBuilder()
+                .setTitle('🎉 Tugas Selesai!')
+                .setDescription(`Tugas **${updated.title}** telah selesai (+50 XP)!\n📌 Masih ada **${remainingInThread} tugas aktif** di thread mata kuliah ini. Thread tetap dibuka. Semangat! 🚀`)
+                .setColor('#00FF7F')
+                .setTimestamp();
+              await threadToDelete.send({ embeds: [keepEmbed] }).catch(() => null);
+              logger.info(`Thread ${threadToDelete.id} dipertahankan karena masih ada ${remainingInThread} tugas aktif.`);
+            } else {
+              if (!isInsideThread) {
+                const closingEmbed = new EmbedBuilder()
+                  .setTitle('🗑️ Seluruh Tugas di Thread Selesai')
+                  .setDescription('🎉 Semua tugas di mata kuliah/thread ini telah tuntas! Thread ini akan dihapus permanen dalam 3 detik...')
+                  .setColor('#00FF7F');
+                await threadToDelete.send({ embeds: [closingEmbed] }).catch(() => null);
+              }
 
-            await new Promise((resolve) => setTimeout(resolve, 3000));
-            await threadToDelete.delete('Tugas telah diselesaikan oleh user').catch(() => null);
-            logger.info(`Thread ${threadToDelete.id} berhasil dihapus permanen karena task ${updated.id} selesai.`);
+              await new Promise((resolve) => setTimeout(resolve, 3000));
+              await threadToDelete.delete('Semua tugas di thread telah diselesaikan').catch(() => null);
+              logger.info(`Thread ${threadToDelete.id} berhasil dihapus permanen karena semua task telah selesai.`);
+            }
           }
 
           // 3. Perbarui Live Radar Dashboard secara realtime
@@ -1511,6 +1578,219 @@ client.on('interactionCreate', async (interaction) => {
     } catch (err) {
       logger.error({ err }, 'Gagal generate rekap tugas');
       await interaction.editReply('❌ Gagal membuat rekap tugas.');
+    }
+  }
+
+  // /workload - Deteksi Beban Kerja & Alert Burnout (Phase 5)
+  if (interaction.commandName === 'workload') {
+    await interaction.deferReply();
+    try {
+      const stats = await TaskService.getWorkloadStats(interaction.user.id, interaction.guildId || undefined);
+      const totalHours = (stats.totalMinutes / 60).toFixed(1);
+      const availHours = (stats.availableMinutes / 60).toFixed(1);
+      const ratio = Math.round((stats.totalMinutes / stats.availableMinutes) * 100);
+
+      const filled = Math.min(10, Math.round(ratio / 10));
+      const gauge = '█'.repeat(filled) + '░'.repeat(10 - filled);
+
+      let statusColor: `#${string}` = '#00FF7F'; // Green
+      let statusBadge = '🟢 Ringan / Aman';
+      if (stats.status === 'OVERLOAD') {
+        statusColor = '#FF0055'; // Red
+        statusBadge = '🚨 OVERLOAD! Risiko Burnout Tinggi';
+      } else if (stats.status === 'HEAVY') {
+        statusColor = '#FFA500'; // Orange
+        statusBadge = '⚠️ Cukup Padat / Perlu Cicil';
+      } else if (stats.status === 'MODERATE') {
+        statusColor = '#F1C40F'; // Yellow
+        statusBadge = '⚡ Produktif Seimbang';
+      }
+
+      const adviceText = await AIService.generateWorkloadAdvice(
+        stats.tasks,
+        stats.totalMinutes,
+        stats.availableMinutes
+      );
+
+      const taskLines = stats.tasks.map((t, i) => {
+        const est = t.estimatedMinutes ? `${t.estimatedMinutes}m` : '60m';
+        const dl = t.dueAt ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R>` : 'Tanpa deadline';
+        return `**${i + 1}.** ${t.title} — ⏱️ \`${est}\` | ⏰ ${dl}`;
+      }).join('\n') || 'Tidak ada tugas yang terdaftar untuk periode ini.';
+
+      const embed = new EmbedBuilder()
+        .setTitle('⚠️ Deteksi Beban Kerja & Workload Radar')
+        .setColor(statusColor)
+        .setDescription(
+          `### Status Beban: **${statusBadge}**\n\n` +
+          `📊 **Indikator Beban Kerja:**\n` +
+          `\`[${gauge}]\` **${ratio}%** (${totalHours} Jam / Kapasitas ${availHours} Jam)\n` +
+          `📋 **Tugas Terjadwal:** ${stats.tasks.length} Tugas Aktif\n\n` +
+          `---\n\n` +
+          `📋 **Daftar Beban Tugas Hari Ini & Besok:**\n` +
+          taskLines + `\n\n` +
+          `---\n\n` +
+          `🧠 **Rekomendasi Cerdas AI:**\n` +
+          adviceText
+        )
+        .setFooter({ text: 'TaskFlow OS • Workload Intelligence • Anti-Burnout Protocol' })
+        .setTimestamp();
+
+      const actionButtons = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId('room_focus_25')
+          .setLabel('🎯 Mulai Fokus 25m')
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId('room_focus_50')
+          .setLabel('🔥 Deep Work 50m')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await interaction.editReply({ embeds: [embed], components: [actionButtons] });
+    } catch (err) {
+      logger.error({ err }, 'Gagal menjalankan /workload');
+      await interaction.editReply('❌ Terjadi kesalahan saat menganalisis beban kerja.');
+    }
+  }
+
+  // /review - AI Weekly Productivity Review & Coaching (Phase 5)
+  if (interaction.commandName === 'review') {
+    await interaction.deferReply();
+    try {
+      const reviewStats = await TaskService.getWeeklyReviewStats(interaction.user.id);
+      if (!reviewStats) {
+        await interaction.editReply('Belum ada data aktivitas untuk dievaluasi.');
+        return;
+      }
+
+      const focusHours = (reviewStats.totalFocusMinutes / 60).toFixed(1);
+      const totalEvaluated = reviewStats.completedTasks.length + reviewStats.overdueTasks.length;
+      const completionRate = totalEvaluated > 0
+        ? Math.round((reviewStats.completedTasks.length / totalEvaluated) * 100)
+        : 100;
+
+      let grade = 'A+ 🏆';
+      if (completionRate < 60) grade = 'C ⚠️';
+      else if (completionRate < 80) grade = 'B 📈';
+      else if (completionRate < 95) grade = 'A 🌟';
+
+      const aiReview = await AIService.generateWeeklyReview(
+        reviewStats.completedTasks,
+        reviewStats.overdueTasks,
+        reviewStats.totalFocusMinutes,
+        reviewStats.accuracyScore
+      );
+
+      const embed = new EmbedBuilder()
+        .setTitle(`📊 Weekly Productivity Review: ${reviewStats.user.username}`)
+        .setColor('#9B59B6')
+        .setDescription(
+          `### Skor Produktivitas 7 Hari: **${grade}**\n\n` +
+          `• ✅ **Tugas Selesai:** **${reviewStats.completedTasks.length}** Tugas\n` +
+          `• ⚠️ **Tugas Overdue / Tertunda:** **${reviewStats.overdueTasks.length}** Tugas\n` +
+          `• ⏱️ **Total Jam Fokus Pomodoro:** **${focusHours} Jam** (${reviewStats.totalFocusMinutes} Menit)\n` +
+          `• 🎯 **Akurasi Estimasi Waktu:** **${reviewStats.accuracyScore}%**\n` +
+          `• 📈 **Completion Rate:** **${completionRate}%**\n\n` +
+          `---\n\n` +
+          aiReview
+        )
+        .setFooter({ text: 'TaskFlow OS • AI Weekly Review • Evaluasi kebiasaan belajarmu tiap minggu!' })
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      logger.error({ err }, 'Gagal menjalankan /review');
+      await interaction.editReply('❌ Terjadi kesalahan saat menyusun weekly review.');
+    }
+  }
+
+  // /course - Mode Mata Kuliah & Thread Grouping (Phase 6)
+  if (interaction.commandName === 'course') {
+    await interaction.deferReply();
+    if (!interaction.guild) {
+      await interaction.editReply('❌ Command ini hanya bisa dijalankan di dalam Server (Guild).');
+      return;
+    }
+
+    const sub = interaction.options.getSubcommand();
+
+    if (sub === 'list') {
+      try {
+        const courses = await TaskService.getCoursesWithTasks(interaction.guild.id);
+        if (courses.length === 0) {
+          const emptyEmbed = new EmbedBuilder()
+            .setTitle('📚 Daftar Mata Kuliah Server')
+            .setDescription('Belum ada mata kuliah yang terdata. Cukup sebutkan nama mata kuliah saat mencatat tugas di inbox (misal: *"Tugas 1 Kalkulus besok"*), atau upload silabus tugas!')
+            .setColor('#5865F2');
+          await interaction.editReply({ embeds: [emptyEmbed] });
+          return;
+        }
+
+        const embed = new EmbedBuilder()
+          .setTitle(`📚 Mata Kuliah & Progress Tugas (${interaction.guild.name})`)
+          .setColor('#5865F2')
+          .setDescription(
+            courses.map(c => {
+              const percent = c.total > 0 ? Math.round((c.done / c.total) * 100) : 0;
+              const filled = Math.round(percent / 10);
+              const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
+              return `### 📖 ${c.name}\n` +
+                `📊 Progress: \`[${bar}]\` **${percent}%** (${c.done}/${c.total} Selesai)\n` +
+                `🔥 Tugas Aktif: **${c.active} Tugas** | Cek: \`/course tasks nama:${c.name}\``;
+            }).join('\n\n')
+          )
+          .setFooter({ text: 'Semua tugas untuk mata kuliah yang sama otomatis berkumpul di 1 thread!' })
+          .setTimestamp();
+
+        await interaction.editReply({ embeds: [embed] });
+      } catch (err) {
+        logger.error({ err }, 'Gagal mengambil /course list');
+        await interaction.editReply('❌ Gagal mengambil daftar mata kuliah.');
+      }
+    } else if (sub === 'tasks') {
+      const courseName = interaction.options.getString('nama', true);
+      try {
+        const tasks = await TaskService.getTasksByCourse(interaction.guild.id, courseName);
+        if (tasks.length === 0) {
+          await interaction.editReply(`❌ Tidak ditemukan tugas untuk mata kuliah **${courseName}**.`);
+          return;
+        }
+
+        const priorityEmoji: Record<string, string> = { URGENT: '🚨', HIGH: '🔥', MEDIUM: '⚡', LOW: '🌱' };
+        const embed = new EmbedBuilder()
+          .setTitle(`📚 Tugas Mata Kuliah: ${courseName}`)
+          .setColor('#5865F2')
+          .setDescription(
+            tasks.map((t, idx) => {
+              const dl = t.dueAt ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R>` : 'Tanpa deadline';
+              const typeBadge = t.taskType === 'GROUP' ? '👥 [Kelompok]' : '👤 [Individu]';
+              const isDone = t.status === 'DONE';
+              const prefix = isDone ? '✅ ~~' : `**${idx + 1}.** `;
+              const suffix = isDone ? '~~' : '';
+              return `${prefix}${typeBadge} ${t.title}${suffix}\n${priorityEmoji[t.priority] || '⚡'} Prioritas: **${t.priority}** | ⏰ Deadline: ${dl}`;
+            }).join('\n\n')
+          )
+          .setFooter({ text: `Total: ${tasks.length} Tugas tercatat untuk ${courseName}` })
+          .setTimestamp();
+
+        const activeTasks = tasks.filter(t => t.status !== 'DONE');
+        const doneButtons = activeTasks.slice(0, 5).map((t, i) =>
+          new ButtonBuilder()
+            .setCustomId(`task_done_${t.id}`)
+            .setLabel(`Selesai #${i + 1}`)
+            .setStyle(ButtonStyle.Success)
+        );
+
+        const rows = doneButtons.length > 0
+          ? [new ActionRowBuilder<ButtonBuilder>().addComponents(doneButtons)]
+          : [];
+
+        await interaction.editReply({ embeds: [embed], components: rows });
+      } catch (err) {
+        logger.error({ err }, 'Gagal mengambil /course tasks');
+        await interaction.editReply('❌ Terjadi kesalahan saat mengambil tugas mata kuliah.');
+      }
     }
   }
 });
