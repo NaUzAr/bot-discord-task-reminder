@@ -48,7 +48,7 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
     const discordUser = await client.users.fetch(user.discordId);
     
     // ActionRow tombol interaktif: Selesai, Tunda 30m, Fokus 25m
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    const buttons = [
       new ButtonBuilder()
         .setCustomId(`task_done_${task.id}`)
         .setLabel('Selesai')
@@ -64,7 +64,19 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
         .setLabel('Fokus 25m')
         .setStyle(ButtonStyle.Primary)
         .setEmoji('🎯')
-    );
+    ];
+
+    if (task.linkUrl) {
+      buttons.push(
+        new ButtonBuilder()
+          .setLabel('Buka Link Tugas')
+          .setStyle(ButtonStyle.Link)
+          .setURL(task.linkUrl)
+          .setEmoji('🔗')
+      );
+    }
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(buttons);
 
     const deadlineInfo = task.dueAt 
       ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:R> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:F>)`
@@ -79,7 +91,17 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
         { name: 'Prioritas', value: `🔥 ${task.priority}`, inline: true },
         { name: 'Status', value: `⚪ ${task.status}`, inline: true },
         { name: 'Estimasi', value: task.estimatedMinutes ? `⏱️ ${task.estimatedMinutes} menit` : 'Tidak ada', inline: true }
-      )
+      );
+
+    if (task.linkUrl) {
+      embed.addFields({
+        name: '🔗 Tempat Pengumpulan',
+        value: `[Klik untuk Membuka Tautan Pengumpulan](${task.linkUrl})`,
+        inline: false
+      });
+    }
+
+    embed
       .setFooter({ text: 'Klik tombol di bawah untuk aksi cepat!' })
       .setTimestamp();
 

@@ -35,6 +35,7 @@ export class TaskService {
         userId: user.id,
         guildId: metadata?.guildId,
         title: extracted.title,
+        linkUrl: extracted.linkUrl,
         dueAt: dueAtDate,
         estimatedMinutes: extracted.estimatedMinutes,
         priority: extracted.priority || 'MEDIUM',
@@ -58,7 +59,8 @@ export class TaskService {
         await reminderQueue.add('send-reminder', {
           taskId: task.id,
           userId: user.id,
-          title: task.title
+          title: task.title,
+          linkUrl: task.linkUrl
         }, {
           delay: effectiveDelay,
           jobId: `reminder_${task.id}`
@@ -129,7 +131,8 @@ export class TaskService {
     await reminderQueue.add('send-reminder', {
       taskId: task.id,
       userId: task.userId,
-      title: task.title
+      title: task.title,
+      linkUrl: task.linkUrl
     }, {
       delay,
       jobId: snoozeJobId

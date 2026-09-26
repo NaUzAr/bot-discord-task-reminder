@@ -65,7 +65,7 @@ client.on('messageCreate', async (message) => {
       ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)` 
       : 'Tidak ada batas waktu';
 
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    const buttons = [
       new ButtonBuilder()
         .setCustomId(`task_done_${task.id}`)
         .setLabel('Selesai')
@@ -81,7 +81,19 @@ client.on('messageCreate', async (message) => {
         .setLabel('Tunda 30m')
         .setStyle(ButtonStyle.Secondary)
         .setEmoji('💤')
-    );
+    ];
+
+    if (task.linkUrl) {
+      buttons.push(
+        new ButtonBuilder()
+          .setLabel('Buka Link Tugas')
+          .setStyle(ButtonStyle.Link)
+          .setURL(task.linkUrl)
+          .setEmoji('🔗')
+      );
+    }
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(buttons);
 
     const embed = new EmbedBuilder()
       .setTitle('📌 Task Otomatis Terdeteksi dari Inbox!')
@@ -91,7 +103,17 @@ client.on('messageCreate', async (message) => {
         `🔥 **Prioritas:** ${task.priority}\n` +
         `👤 **Pembuat:** <@${message.author.id}>`
       )
-      .setColor('#00E5FF')
+      .setColor('#00E5FF');
+
+    if (task.linkUrl) {
+      embed.addFields({
+        name: '🔗 Tempat Pengumpulan',
+        value: `[Klik untuk Membuka Tautan Pengumpulan](${task.linkUrl})`,
+        inline: false
+      });
+    }
+
+    embed
       .setFooter({ text: 'Klik "AI Breakdown" untuk memecah tugas ini jadi checklist praktis!' })
       .setTimestamp();
 
@@ -237,14 +259,35 @@ client.on('interactionCreate', async (interaction) => {
         const embed = new EmbedBuilder()
           .setTitle('📥 Task Berhasil Dibuat dari Pesan!')
           .setDescription(`📌 **Judul:** ${task.title}\n⏰ **Deadline:** ${deadlineText}\n🔥 **Prioritas:** ${task.priority}`)
-          .setColor('#00E5FF')
-          .addFields({
-            name: 'Pesan Asli',
-            value: `[Loncat ke Pesan](https://discord.com/channels/${interaction.guildId || '@me'}/${targetMessage.channelId}/${targetMessage.id})`
-          })
-          .setTimestamp();
+          .setColor('#00E5FF');
 
-        await interaction.editReply({ embeds: [embed] });
+        if (task.linkUrl) {
+          embed.addFields({
+            name: '🔗 Tempat Pengumpulan',
+            value: `[Klik untuk Membuka Tautan Pengumpulan](${task.linkUrl})`
+          });
+        }
+
+        embed.addFields({
+          name: 'Pesan Asli',
+          value: `[Loncat ke Pesan](https://discord.com/channels/${interaction.guildId || '@me'}/${targetMessage.channelId}/${targetMessage.id})`
+        }).setTimestamp();
+
+        const contextButtons = [];
+        if (task.linkUrl) {
+          contextButtons.push(
+            new ButtonBuilder()
+              .setLabel('Buka Link Tugas')
+              .setStyle(ButtonStyle.Link)
+              .setURL(task.linkUrl)
+              .setEmoji('🔗')
+          );
+        }
+        const contextRow = contextButtons.length > 0 
+          ? [new ActionRowBuilder<ButtonBuilder>().addComponents(contextButtons)] 
+          : [];
+
+        await interaction.editReply({ embeds: [embed], components: contextRow });
       } catch (err) {
         logger.error({ err }, 'Gagal membuat task dari context menu');
         await interaction.editReply('❌ Terjadi kesalahan saat menyimpan tugas.');
@@ -299,7 +342,33 @@ client.on('interactionCreate', async (interaction) => {
         ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)` 
         : 'Tidak ada batas waktu';
 
-      await interaction.editReply(`✅ **Task Berhasil Dibuat & Reminder Dijadwalkan!**\n\n📌 **Judul:** ${task.title}\n⏰ **Deadline:** ${deadlineText}\n🔥 **Prioritas:** ${task.priority}`);
+      const embed = new EmbedBuilder()
+        .setTitle('✅ Task Berhasil Dibuat & Reminder Dijadwalkan!')
+        .setDescription(`📌 **Judul:** ${task.title}\n⏰ **Deadline:** ${deadlineText}\n🔥 **Prioritas:** ${task.priority}`)
+        .setColor('#00FF7F');
+
+      if (task.linkUrl) {
+        embed.addFields({
+          name: '🔗 Tempat Pengumpulan',
+          value: `[Klik untuk Membuka Tautan Pengumpulan](${task.linkUrl})`
+        });
+      }
+
+      const taskButtons = [];
+      if (task.linkUrl) {
+        taskButtons.push(
+          new ButtonBuilder()
+            .setLabel('Buka Link Tugas')
+            .setStyle(ButtonStyle.Link)
+            .setURL(task.linkUrl)
+            .setEmoji('🔗')
+        );
+      }
+      const taskRow = taskButtons.length > 0 
+        ? [new ActionRowBuilder<ButtonBuilder>().addComponents(taskButtons)] 
+        : [];
+
+      await interaction.editReply({ embeds: [embed], components: taskRow });
     } catch (err) {
       logger.error({ err }, 'Gagal menyimpan task ke database');
       await interaction.editReply('❌ Terjadi kesalahan saat menyimpan ke database.');
@@ -330,7 +399,8 @@ client.on('interactionCreate', async (interaction) => {
         .setDescription(
           tasks.map((t, idx) => {
             const dl = t.dueAt ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R>` : 'Tanpa deadline';
-            return `**${idx + 1}. ${t.title}**\n${priorityEmoji[t.priority] || '⚡'} Prioritas: **${t.priority}** | ⏰ Deadline: ${dl}`;
+            const linkText = t.linkUrl ? ` | 🔗 [Link](${t.linkUrl})` : '';
+            return `**${idx + 1}. ${t.title}**\n${priorityEmoji[t.priority] || '⚡'} Prioritas: **${t.priority}** | ⏰ Deadline: ${dl}${linkText}`;
           }).join('\n\n')
         )
         .setFooter({ text: 'Klik tombol di bawah untuk menyelesaikan tugas' });
@@ -382,7 +452,10 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle('🚨 Deadline Radar (HARI INI)')
         .setColor('#FFCC00')
         .setDescription(
-          tasks.map((t, i) => `**${i + 1}. ${t.title}**\n⏰ <t:${Math.floor(t.dueAt!.getTime() / 1000)}:R> - 🔥 ${t.priority}`).join('\n\n')
+          tasks.map((t, i) => {
+            const linkText = t.linkUrl ? ` | 🔗 [Link](${t.linkUrl})` : '';
+            return `**${i + 1}. ${t.title}**\n⏰ <t:${Math.floor(t.dueAt!.getTime() / 1000)}:R> - 🔥 ${t.priority}${linkText}`;
+          }).join('\n\n')
         );
 
       await interaction.editReply({ embeds: [embed] });

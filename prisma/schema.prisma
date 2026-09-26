@@ -57,6 +57,7 @@ model Task {
 
   title       String
   description String?
+  linkUrl     String?
 
   status   TaskStatus @default(TODO)
   priority Priority   @default(MEDIUM)

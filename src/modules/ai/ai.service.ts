@@ -23,7 +23,16 @@ export const TaskExtractionSchema = z.object({
       if (['LOW', 'MEDIUM', 'HIGH', 'URGENT'].includes(upper)) return upper;
     }
     return 'MEDIUM';
-  }, z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"])).describe("Priority based on urgency and context.")
+  }, z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"])).describe("Priority based on urgency and context."),
+  linkUrl: z.preprocess((val) => {
+    if (!val || typeof val !== 'string') return null;
+    try {
+      const u = new URL(val);
+      return u.toString();
+    } catch {
+      return null;
+    }
+  }, z.string().url().nullable().optional()).describe("Submission URL or assignment link if mentioned.")
 });
 
 export type ExtractedTask = z.infer<typeof TaskExtractionSchema>;
@@ -47,13 +56,15 @@ Rules:
 2. Determine exact deadline (dueAt) in ISO 8601 UTC format based on relative time (e.g. "besok jam 8 malam" or "lusa pagi"). Calculate from current server time and user timezone. Return null if no deadline is mentioned.
 3. Determine estimated duration in minutes as an integer if mentioned (e.g. "2 jam" -> 120, "30 menit" -> 30). Return null if not mentioned.
 4. Guess priority: strictly "LOW", "MEDIUM", "HIGH", or "URGENT". Default to "MEDIUM".
+5. Extract submission link (linkUrl): if user mentions a URL (e.g. https://classroom.google.com/..., Google Drive, LMS, etc.), extract it. Return null if no link is mentioned.
 
 Output strictly valid JSON with keys:
 {
   "title": string,
   "dueAt": string | null,
   "estimatedMinutes": number | null,
-  "priority": "LOW" | "MEDIUM" | "HIGH" | "URGENT"
+  "priority": "LOW" | "MEDIUM" | "HIGH" | "URGENT",
+  "linkUrl": string | null
 }
 `;
 
@@ -73,7 +84,19 @@ Output strictly valid JSON with keys:
         if (!textOutput) continue;
 
         const parsedJSON = JSON.parse(textOutput);
-        return TaskExtractionSchema.parse(parsedJSON);
+        const parsed = TaskExtractionSchema.parse(parsedJSON);
+
+        // Regex fallback: Jika AI melewatkan URL, ambil URL pertama yang cocok di teks user
+        if (!parsed.linkUrl) {
+          const urlMatch = userInput.match(/https?:\/\/[^\s]+/i);
+          if (urlMatch) {
+            try {
+              parsed.linkUrl = new URL(urlMatch[0]).toString();
+            } catch {}
+          }
+        }
+
+        return parsed;
       } catch (error: any) {
         logger.warn({ model: modelName, err: error?.message || error }, 'AI model attempt failed, trying fallback if available');
       }
