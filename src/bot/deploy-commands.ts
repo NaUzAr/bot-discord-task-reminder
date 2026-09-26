@@ -37,16 +37,21 @@ export async function deployCommands(clientId: string, guildIds: string[] = []) 
   try {
     logger.info(`Memulai registrasi ${commands.length} Commands...`);
 
-    // 1. Daftarkan langsung ke Guild/Server agar aktif INSTAN (tanpa jeda 1 jam Discord cache)
     const targetGuilds = env.GUILD_ID ? [env.GUILD_ID] : guildIds;
-    for (const gId of targetGuilds) {
-      await rest.put(Routes.applicationGuildCommands(clientId, gId), { body: commands });
-      logger.info(`⚡ Commands langsung aktif instan di Guild/Server ID: ${gId}`);
-    }
 
-    // 2. Daftarkan juga secara Global (untuk Direct Message / server baru)
-    await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    logger.info('✅ Commands berhasil didaftarkan secara Global.');
+    if (targetGuilds.length > 0) {
+      // 1. Daftarkan ke Guild/Server agar aktif INSTAN
+      for (const gId of targetGuilds) {
+        await rest.put(Routes.applicationGuildCommands(clientId, gId), { body: commands });
+        logger.info(`⚡ Commands aktif instan di Guild/Server ID: ${gId}`);
+      }
+      // 2. Kosongkan Global commands agar tidak muncul dobel di server yang sama
+      await rest.put(Routes.applicationCommands(clientId), { body: [] });
+      logger.info('✅ Global commands dibersihkan (mencegah duplikasi).');
+    } else {
+      await rest.put(Routes.applicationCommands(clientId), { body: commands });
+      logger.info('✅ Commands berhasil didaftarkan secara Global.');
+    }
   } catch (error) {
     logger.error({ err: error }, 'Gagal mendaftarkan commands');
   }
