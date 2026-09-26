@@ -29,6 +29,17 @@ const commands = [
   new SlashCommandBuilder()
     .setName('briefing')
     .setDescription('Kirim Morning Briefing ringkasan tugas hari ini ke channel radar sekarang'),
+  new SlashCommandBuilder()
+    .setName('rekap')
+    .setDescription('Export rekap tugas terformat rapi untuk di-copas ke WhatsApp/Telegram')
+    .addStringOption(option =>
+      option.setName('cakupan')
+        .setDescription('Pilih cakupan rekap: Seluruh Tugas Server atau Tugas Saya')
+        .addChoices(
+          { name: '🌐 Seluruh Tugas Server (Untuk Grup Kelas)', value: 'server' },
+          { name: '👤 Tugas Pribadi Saya Saja', value: 'saya' }
+        )
+    ),
   new ContextMenuCommandBuilder()
     .setName('Add to TaskFlow')
     .setType(ApplicationCommandType.Message)

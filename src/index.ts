@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, TextChannel } from 'discord.js';
+import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, TextChannel, AttachmentBuilder } from 'discord.js';
 import { env } from './config/env';
 import { logger } from './shared/utils/logger';
 import { deployCommands } from './bot/deploy-commands';
@@ -8,6 +8,7 @@ import { GuildService } from './modules/guild/guild.service';
 import { prisma } from './database/prisma';
 import { generateGoogleCalendarUrl } from './shared/utils/calendar';
 import { BriefingService } from './modules/briefing/briefing.service';
+import { ExportService } from './modules/export/export.service';
 
 // 🔄 Menyalakan BullMQ Worker secara otomatis saat bot berjalan!
 import './workers/reminder.worker'; 
@@ -715,6 +716,68 @@ client.on('interactionCreate', async (interaction) => {
     } catch (err) {
       logger.error({ err }, 'Gagal mengirim briefing via slash command');
       await interaction.editReply('❌ Terjadi kesalahan saat mengirim briefing.');
+    }
+  }
+
+  // /rekap - Export rekap tugas format rapi untuk WhatsApp/Telegram
+  if (interaction.commandName === 'rekap') {
+    await interaction.deferReply();
+    const cakupan = interaction.options.getString('cakupan') || 'server';
+
+    try {
+      let tasks: any[] = [];
+      let scopeTitle = '';
+
+      if (cakupan === 'saya') {
+        scopeTitle = `Tugas Pribadi (${interaction.user.username})`;
+        tasks = await TaskService.getUserActiveTasks(interaction.user.id, 20);
+      } else {
+        if (!interaction.guild) {
+          await interaction.editReply('❌ Opsi rekap server hanya bisa digunakan di dalam server.');
+          return;
+        }
+        scopeTitle = `Server ${interaction.guild.name}`;
+        const dbGuild = await prisma.guild.findUnique({
+          where: { discordGuildId: interaction.guild.id }
+        });
+
+        if (dbGuild) {
+          tasks = await prisma.task.findMany({
+            where: {
+              guildId: dbGuild.id,
+              status: { in: ['TODO', 'IN_PROGRESS'] },
+              deletedAt: null
+            },
+            include: { user: true },
+            orderBy: [{ dueAt: 'asc' }, { priority: 'desc' }],
+            take: 25
+          });
+        }
+      }
+
+      const waText = ExportService.formatWhatsAppRekap(tasks, scopeTitle, client);
+
+      const previewEmbed = new EmbedBuilder()
+        .setTitle(`📋 Rekap Tugas Siap Copas (${scopeTitle})`)
+        .setColor('#25D366') // WhatsApp Brand Color
+        .setDescription(
+          'Gunakan blok teks di bawah ini atau download file terlampir untuk langsung dibagikan ke WhatsApp / Telegram grup kelasmu!\n\n' +
+          '```text\n' + (waText.length > 3900 ? waText.slice(0, 3850) + '\n\n...(Dipotong, cek file lampiran untuk teks lengkap)...' : waText) + '\n```'
+        )
+        .setFooter({ text: 'Klik icon salin di pojok kanan atas blok teks untuk copy instan!' })
+        .setTimestamp();
+
+      const attachment = new AttachmentBuilder(Buffer.from(waText, 'utf-8'), {
+        name: `rekap-tugas-${cakupan === 'saya' ? 'pribadi' : 'server'}.txt`
+      });
+
+      await interaction.editReply({
+        embeds: [previewEmbed],
+        files: [attachment]
+      });
+    } catch (err) {
+      logger.error({ err }, 'Gagal generate rekap tugas');
+      await interaction.editReply('❌ Gagal membuat rekap tugas.');
     }
   }
 });
