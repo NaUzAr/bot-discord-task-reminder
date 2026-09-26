@@ -52,6 +52,7 @@ client.on('messageCreate', async (message) => {
       extracted,
       {
         guildId: message.guild.id,
+        guildName: message.guild.name,
         sourceType: 'INBOX_MESSAGE',
         sourceMessageId: message.id,
         sourceChannelId: message.channel.id
@@ -336,7 +337,15 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     try {
-      const task = await TaskService.createTaskFromAI(interaction.user.id, interaction.user.username, extracted);
+      const task = await TaskService.createTaskFromAI(
+        interaction.user.id,
+        interaction.user.username,
+        extracted,
+        {
+          guildId: interaction.guildId ?? undefined,
+          guildName: interaction.guild?.name
+        }
+      );
       
       const deadlineText = task.dueAt 
         ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)` 

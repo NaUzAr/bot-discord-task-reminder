@@ -14,12 +14,21 @@ export class TaskService {
     });
   }
 
+  static async getOrCreateGuild(discordGuildId: string, name?: string) {
+    return prisma.guild.upsert({
+      where: { discordGuildId },
+      update: name ? { name } : {},
+      create: { discordGuildId, name: name || 'Discord Server' }
+    });
+  }
+
   static async createTaskFromAI(
     discordId: string, 
     username: string, 
     extracted: ExtractedTask,
     metadata?: {
       guildId?: string;
+      guildName?: string;
       sourceType?: string;
       sourceMessageId?: string;
       sourceChannelId?: string;
@@ -27,13 +36,19 @@ export class TaskService {
   ): Promise<Task> {
     const user = await this.getOrCreateUser(discordId, username);
 
+    let dbGuildId: string | null = null;
+    if (metadata?.guildId) {
+      const guild = await this.getOrCreateGuild(metadata.guildId, metadata.guildName);
+      dbGuildId = guild.id;
+    }
+
     const dueAtDate = extracted.dueAt ? new Date(extracted.dueAt) : null;
 
     // 1. Simpan Task ke Database
     const task = await prisma.task.create({
       data: {
         userId: user.id,
-        guildId: metadata?.guildId,
+        guildId: dbGuildId,
         title: extracted.title,
         linkUrl: extracted.linkUrl,
         dueAt: dueAtDate,
