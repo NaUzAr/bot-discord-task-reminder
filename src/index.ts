@@ -434,7 +434,7 @@ client.on('interactionCreate', async (interaction) => {
       const isInsideThread = interaction.channel?.isThread();
 
       // Cek apakah masih ada tugas aktif lain di thread ini!
-      let remainingInThread = 0;
+      let remainingTasks: any[] = [];
       let threadObj: any = null;
       if (isInsideThread) {
         threadObj = interaction.channel;
@@ -444,18 +444,19 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (threadObj) {
-        remainingInThread = await prisma.task.count({
+        remainingTasks = await prisma.task.findMany({
           where: {
             sourceChannelId: threadObj.id,
             status: { in: ['TODO', 'IN_PROGRESS'] },
             id: { not: updated.id },
             deletedAt: null
-          }
+          },
+          orderBy: [{ dueAt: 'asc' }, { priority: 'desc' }]
         });
       }
 
-      const threadNote = remainingInThread > 0
-        ? `\n\n📌 *Masih ada ${remainingInThread} tugas aktif lagi di thread mata kuliah ini. Thread tetap dibuka!*`
+      const threadNote = remainingTasks.length > 0
+        ? `\n\n📌 *Masih ada ${remainingTasks.length} tugas aktif lagi di thread ini (daftar tugas tersisa ditampilkan di bawah).*`
         : (isInsideThread ? '\n\n🗑️ *Seluruh tugas di thread ini telah tuntas. Thread akan otomatis dihapus permanen dalam 3 detik...*' : '');
 
       const doneEmbed = new EmbedBuilder()
@@ -503,7 +504,7 @@ client.on('interactionCreate', async (interaction) => {
           }
 
           // 1. Bersihkan pesan chat & notifikasi bot di inbox-tugas jika tidak ada tugas tersisa
-          if (parentChannelId && remainingInThread === 0) {
+          if (parentChannelId && remainingTasks.length === 0) {
             const parentChannel = await client.channels.fetch(parentChannelId).catch(() => null);
             if (parentChannel && 'messages' in parentChannel) {
               try {
@@ -532,19 +533,55 @@ client.on('interactionCreate', async (interaction) => {
 
           // 2. Beri pesan penutup di thread lalu hapus thread jika semua tugas selesai
           if (threadToDelete) {
-            if (remainingInThread > 0) {
+            if (remainingTasks.length > 0) {
+              const priorityEmoji: Record<string, string> = { URGENT: '🚨', HIGH: '🔥', MEDIUM: '⚡', LOW: '🌱' };
+
+              const remainingListText = remainingTasks.map((t, idx) => {
+                const dl = t.dueAt 
+                  ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R> (<t:${Math.floor(t.dueAt.getTime() / 1000)}:t>)` 
+                  : 'Tanpa batas waktu';
+                const typeBadge = t.taskType === 'GROUP' ? '👥' : '👤';
+                const link = t.linkUrl ? ` | 🔗 [Link](${t.linkUrl})` : '';
+                return `**${idx + 1}.** ${typeBadge} **${t.title}**\n> ⏰ Deadline: ${dl}\n> 🔥 Prioritas: ${priorityEmoji[t.priority] || '⚡'} **${t.priority}**${link}`;
+              }).join('\n\n');
+
               const keepEmbed = new EmbedBuilder()
                 .setTitle('🎉 Tugas Selesai!')
-                .setDescription(`Tugas **${updated.title}** telah selesai (+50 XP)!\n📌 Masih ada **${remainingInThread} tugas aktif** di thread mata kuliah ini. Thread tetap dibuka. Semangat! 🚀`)
+                .setDescription(
+                  `Tugas **${updated.title}** telah diselesaikan (+50 XP)!\n\n` +
+                  `📋 **TUGAS TERSISA DI THREAD INI (${remainingTasks.length} Tugas):**\n\n` +
+                  remainingListText +
+                  `\n\n*Thread tetap dibuka sampai seluruh tugas di atas tuntas. Semangat!* 🚀`
+                )
                 .setColor('#00FF7F')
+                .setFooter({ text: 'TaskFlow OS • Course Thread Tracker' })
                 .setTimestamp();
-              await threadToDelete.send({ embeds: [keepEmbed] }).catch(() => null);
-              logger.info(`Thread ${threadToDelete.id} dipertahankan karena masih ada ${remainingInThread} tugas aktif.`);
+
+              // Tambahkan tombol Selesai cepat untuk tugas yang tersisa (maksimal 4 tombol + 1 tombol fokus)
+              const actionRows: ActionRowBuilder<ButtonBuilder>[] = [];
+              const taskButtons = remainingTasks.slice(0, 4).map((t, i) =>
+                new ButtonBuilder()
+                  .setCustomId(`task_done_${t.id}`)
+                  .setLabel(`Selesai #${i + 1}`)
+                  .setStyle(ButtonStyle.Success)
+              );
+
+              taskButtons.push(
+                new ButtonBuilder()
+                  .setCustomId('room_focus_25')
+                  .setLabel('🎯 Fokus 25m')
+                  .setStyle(ButtonStyle.Primary)
+              );
+
+              actionRows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(taskButtons));
+
+              await threadToDelete.send({ embeds: [keepEmbed], components: actionRows }).catch(() => null);
+              logger.info(`Thread ${threadToDelete.id} dipertahankan dengan daftar ${remainingTasks.length} tugas aktif.`);
             } else {
               if (!isInsideThread) {
                 const closingEmbed = new EmbedBuilder()
                   .setTitle('🗑️ Seluruh Tugas di Thread Selesai')
-                  .setDescription('🎉 Semua tugas di mata kuliah/thread ini telah tuntas! Thread ini akan dihapus permanen dalam 3 detik...')
+                  .setDescription('🎉 Luar biasa! Semua tugas di mata kuliah/thread ini telah tuntas (+Bonus 30 XP)! Thread ini akan dihapus permanen dalam 3 detik...')
                   .setColor('#00FF7F');
                 await threadToDelete.send({ embeds: [closingEmbed] }).catch(() => null);
               }
