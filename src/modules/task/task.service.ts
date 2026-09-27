@@ -705,7 +705,11 @@ export class TaskService {
     const hourUTC = (data.deadlineHour - 7 + 24) % 24;
     const minuteUTC = data.deadlineMinute;
 
-    const nextRunAt = this.computeNextRun(data.repeatPattern, data.dayOfWeek, hourUTC, minuteUTC);
+    // 1. Hitung deadline untuk siklus aktif pertama yang akan segera datang
+    const firstDueAt = this.computeNextRun(data.repeatPattern, data.dayOfWeek, hourUTC, minuteUTC);
+
+    // 2. Jadwal generasi berikutnya (setelah siklus pertama selesai)
+    const nextRunAt = this.computeNextRun(data.repeatPattern, data.dayOfWeek, hourUTC, minuteUTC, firstDueAt);
 
     const recurring = await prisma.recurringTask.create({
       data: {
@@ -724,12 +728,41 @@ export class TaskService {
         hourUTC,
         minuteUTC,
         nextRunAt,
+        lastCreatedAt: new Date(),
         isActive: true
       }
     });
 
-    logger.info(`RecurringTask dibuat: "${recurring.title}" (${recurring.repeatPattern}) nextRun=${nextRunAt.toISOString()}`);
-    return recurring;
+    // 3. Langsung buat task instance untuk siklus pertama agar thread dan checklist segera aktif!
+    const subtasksArray = Array.isArray(data.subtasks) ? data.subtasks : [];
+    const initialTask = await prisma.task.create({
+      data: {
+        userId: user.id,
+        guildId: dbGuildId,
+        courseId: data.courseName || null,
+        title: data.title,
+        description: data.description || null,
+        linkUrl: data.linkUrl || null,
+        dueAt: firstDueAt,
+        priority: (data.priority as any) || 'MEDIUM',
+        status: 'TODO',
+        taskType: data.taskType || 'INDIVIDUAL',
+        assignedUserIds: data.assignedUserIds || [data.discordId],
+        recurringRule: `${data.repeatPattern}:${recurring.id}`,
+        sourceType: 'RECURRING'
+      }
+    });
+
+    if (subtasksArray.length > 0) {
+      await this.createSubtasks(initialTask.id, subtasksArray);
+    }
+
+    if (firstDueAt) {
+      await this.scheduleTaskReminders(initialTask);
+    }
+
+    logger.info(`RecurringTask dibuat: "${recurring.title}" (${recurring.repeatPattern}) initialTaskId=${initialTask.id}`);
+    return { recurring, initialTask, firstDueAt };
   }
 
   /**
@@ -828,7 +861,21 @@ export class TaskService {
           data: { nextRunAt: nextRun, lastCreatedAt: now }
         });
 
-        createdTasks.push({ taskId: task.id, title: task.title, discordId: rec.user.discordId, guildDiscordId: rec.guild?.discordGuildId });
+        createdTasks.push({
+          taskId: task.id,
+          task,
+          title: task.title,
+          discordId: rec.user.discordId,
+          guildDiscordId: rec.guild?.discordGuildId,
+          courseName: rec.courseName,
+          taskType: rec.taskType,
+          linkUrl: rec.linkUrl,
+          dueAt: task.dueAt,
+          assignedUserIds: rec.assignedUserIds,
+          subtasks: subtasksArray,
+          description: rec.description,
+          priority: rec.priority
+        });
         logger.info(`Recurring auto-created task: "${task.title}" (next: ${nextRun.toISOString()})`);
       } catch (err: any) {
         const errMsg = `Gagal proses recurring ${rec.id}: ${err?.message || err}`;

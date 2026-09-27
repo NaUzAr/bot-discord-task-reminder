@@ -11,7 +11,9 @@ import {
   TextInputBuilder,
   TextInputStyle,
   StringSelectMenuBuilder,
-  StringSelectMenuOptionBuilder
+  StringSelectMenuOptionBuilder,
+  ChannelType,
+  PermissionFlagsBits
 } from 'discord.js';
 import { env } from './config/env';
 import { logger } from './shared/utils/logger';
@@ -70,15 +72,21 @@ client.once('clientReady', async () => {
     try {
       const { createdTasks } = await TaskService.processRecurringTasks();
       for (const ct of createdTasks) {
+        let thread: any = null;
+        if (ct.guildDiscordId) {
+          thread = await postTaskToGuildThread(client, ct);
+        }
+
         // Kirim notifikasi DM ke user bahwa tugas baru auto-generated
         try {
           const discordUser = await client.users.fetch(ct.discordId).catch(() => null);
           if (discordUser) {
+            const threadNote = thread ? `\n\n🧵 **Thread Server:** <#${thread.id}>` : '';
             const embed = new EmbedBuilder()
               .setTitle('🔁 Tugas Berulang Otomatis Dibuat!')
               .setDescription(
                 `📌 **${ct.title}**\n\n` +
-                `Tugas ini otomatis dibuat dari jadwal berulangmu. Cek detail dan deadline-nya di server ya!`
+                `Tugas ini otomatis dibuat dari jadwal berulangmu.${threadNote}\nCek rincian dan checklist-nya ya!`
               )
               .setColor('#9B59B6')
               .setFooter({ text: 'TaskFlow OS • Recurring Task Auto-Generator' })
@@ -98,7 +106,13 @@ client.once('clientReady', async () => {
   }, 15 * 60 * 1000); // Setiap 15 menit
 
   // Jalankan sekali saat boot untuk proses recurring yang tertunda
-  TaskService.processRecurringTasks().catch(() => null);
+  TaskService.processRecurringTasks().then(async ({ createdTasks }) => {
+    for (const ct of createdTasks) {
+      if (ct.guildDiscordId) {
+        await postTaskToGuildThread(client, ct);
+      }
+    }
+  }).catch(() => null);
 });
 
 // 📥 AUTO-LISTEN: Mendengarkan pesan obrolan di channel inbox-tugas secara otomatis
@@ -488,6 +502,239 @@ function renderSubtasksChecklist(task: { title: string }, subtasks: any[]) {
   }
 
   return { embed: breakdownEmbed, components: compRows };
+}
+
+/**
+ * 🔁 Helper untuk membuat/reuse thread di channel inbox server dan mengirimkan Task Card interaktif untuk tugas berulang
+ */
+async function postTaskToGuildThread(client: Client, taskData: {
+  taskId: string;
+  task?: any;
+  title: string;
+  description?: string | null;
+  courseName?: string | null;
+  linkUrl?: string | null;
+  dueAt?: Date | null;
+  priority?: string;
+  taskType?: string;
+  assignedUserIds?: string[];
+  subtasks?: string[];
+  discordId: string;
+  guildDiscordId?: string | null;
+}) {
+  if (!taskData.guildDiscordId) return null;
+
+  try {
+    const guild = await client.guilds.fetch(taskData.guildDiscordId).catch(() => null);
+    if (!guild) return null;
+
+    const dbGuild = await prisma.guild.findUnique({ where: { discordGuildId: guild.id } });
+
+    // Cari text channel inbox
+    let targetTextChannel: TextChannel | null = null;
+    if (dbGuild?.inboxChannelId) {
+      targetTextChannel = (await guild.channels.fetch(dbGuild.inboxChannelId).catch(() => null)) as TextChannel | null;
+    }
+    if (!targetTextChannel) {
+      targetTextChannel = guild.channels.cache.find(
+        c => c.type === ChannelType.GuildText && (c.name.includes('inbox') || c.name.includes('tugas'))
+      ) as TextChannel | null;
+    }
+    if (!targetTextChannel) {
+      targetTextChannel = guild.channels.cache.find(
+        c => c.type === ChannelType.GuildText && (c as TextChannel).permissionsFor(guild.members.me || '')?.has(PermissionFlagsBits.SendMessages)
+      ) as TextChannel | null;
+    }
+    if (!targetTextChannel) {
+      logger.warn(`Tidak dapat menemukan channel inbox untuk guild ${guild.id}`);
+      return null;
+    }
+
+    const isGroup = taskData.taskType === 'GROUP' || (taskData.assignedUserIds && taskData.assignedUserIds.length > 1);
+    let thread: any = null;
+    let isReusedThread = false;
+
+    // 1. Cek apakah ada thread aktif untuk mata kuliah / tipe ini (Smart Thread Grouping)
+    if (taskData.courseName && 'threads' in targetTextChannel) {
+      try {
+        const activeThreads = await targetTextChannel.threads.fetchActive().catch(() => null);
+        if (activeThreads) {
+          const courseLower = taskData.courseName.toLowerCase();
+          const existingThread = activeThreads.threads.find(th => {
+            const thLower = th.name.toLowerCase();
+            if (!thLower.includes(courseLower)) return false;
+            const isGroupThread = thLower.includes('kelompok') || thLower.includes('👥');
+            return isGroup ? isGroupThread : !isGroupThread;
+          });
+          if (existingThread && !existingThread.archived) {
+            thread = existingThread;
+            isReusedThread = true;
+            logger.info(`Reusing existing thread: ${thread.name} (${thread.id}) for recurring task: ${taskData.title}`);
+          }
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Gagal fetch active threads');
+      }
+    }
+
+    // 2. Jika belum ada, buat thread baru di inbox channel
+    if (!thread && 'threads' in targetTextChannel) {
+      try {
+        const threadPrefix = isGroup ? '👥・[Kelompok]' : '🔁・[Rutin]';
+        const threadName = taskData.courseName
+          ? `${threadPrefix} ${taskData.courseName}`
+          : `${threadPrefix} ${taskData.title.slice(0, 75)}`;
+
+        thread = await targetTextChannel.threads.create({
+          name: threadName,
+          autoArchiveDuration: 1440,
+          reason: 'TaskFlow OS Auto Recurring Task'
+        });
+      } catch (err) {
+        logger.warn({ err }, 'Gagal membuat thread baru untuk recurring task');
+      }
+    }
+
+    // Masukkan anggota ke thread
+    if (thread) {
+      const memberIds = taskData.assignedUserIds && taskData.assignedUserIds.length > 0
+        ? taskData.assignedUserIds
+        : [taskData.discordId];
+      for (const uid of memberIds) {
+        await thread.members.add(uid).catch(() => null);
+      }
+    }
+
+    // Siapkan Deadline text
+    const deadlineText = taskData.dueAt
+      ? `<t:${Math.floor(new Date(taskData.dueAt).getTime() / 1000)}:F> (<t:${Math.floor(new Date(taskData.dueAt).getTime() / 1000)}:R>)`
+      : 'Tidak ada batas waktu';
+
+    // Siapkan tombol aksi
+    const primaryButtons = [
+      new ButtonBuilder()
+        .setCustomId(`task_done_${taskData.taskId}`)
+        .setLabel('Selesai')
+        .setStyle(ButtonStyle.Success)
+        .setEmoji('✅'),
+      new ButtonBuilder()
+        .setCustomId(`task_edit_${taskData.taskId}`)
+        .setLabel('Edit')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('✏️'),
+      new ButtonBuilder()
+        .setCustomId(`task_breakdown_${taskData.taskId}`)
+        .setLabel('AI Breakdown')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('🧩'),
+      new ButtonBuilder()
+        .setCustomId(`task_snooze_${taskData.taskId}_30`)
+        .setLabel('Tunda 30m')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('💤')
+    ];
+
+    const linkButtons = [];
+    if (taskData.dueAt) {
+      const gcalUrl = generateGoogleCalendarUrl(taskData.title, new Date(taskData.dueAt), taskData.linkUrl || undefined);
+      linkButtons.push(
+        new ButtonBuilder()
+          .setLabel('Google Calendar')
+          .setStyle(ButtonStyle.Link)
+          .setURL(gcalUrl)
+          .setEmoji('📅')
+      );
+    }
+    if (taskData.linkUrl) {
+      linkButtons.push(
+        new ButtonBuilder()
+          .setLabel('Buka Link')
+          .setStyle(ButtonStyle.Link)
+          .setURL(taskData.linkUrl)
+          .setEmoji('🔗')
+      );
+    }
+
+    const actionRows: ActionRowBuilder<ButtonBuilder>[] = [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(primaryButtons)
+    ];
+    if (linkButtons.length > 0) {
+      actionRows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(linkButtons));
+    }
+
+    const embedColor = isGroup ? '#9B59B6' : '#00E5FF';
+    const memberListText = (taskData.assignedUserIds && taskData.assignedUserIds.length > 0)
+      ? taskData.assignedUserIds.map(id => `<@${id}>`).join(', ')
+      : `<@${taskData.discordId}>`;
+
+    const embed = new EmbedBuilder()
+      .setTitle(isGroup ? '👥 Tugas Kelompok Berulang Aktif!' : '🔁 Tugas Berulang Aktif!')
+      .setDescription(
+        `### **${taskData.title}**\n\n` +
+        `🏷️ **Tipe:** **${isGroup ? '👥 Tugas Kelompok' : '👤 Tugas Individu (Rutin)'}**\n` +
+        (taskData.courseName ? `📚 **Mata Kuliah:** ${taskData.courseName}\n` : '') +
+        `👥 **Anggota:** ${memberListText}\n` +
+        `⏰ **Deadline:** ${deadlineText}\n` +
+        `🔥 **Prioritas:** ${taskData.priority || 'MEDIUM'}`
+      )
+      .setColor(embedColor);
+
+    if (taskData.description) {
+      embed.addFields({
+        name: '📝 Spesifikasi & Format Tugas',
+        value: taskData.description.length > 1024 ? taskData.description.slice(0, 1020) + '...' : taskData.description,
+        inline: false
+      });
+    }
+
+    if (taskData.linkUrl) {
+      embed.addFields({
+        name: '🔗 Tempat Pengumpulan',
+        value: `[Klik untuk Membuka Tautan Pengumpulan](${taskData.linkUrl})`,
+        inline: false
+      });
+    }
+
+    embed
+      .setFooter({ text: 'TaskFlow OS • Auto Recurring Task • Klik "Selesai" jika tugas beres!' })
+      .setTimestamp();
+
+    const targetSendChannel = thread || targetTextChannel;
+    await targetSendChannel.send({ embeds: [embed], components: actionRows });
+
+    // Render subtasks jika ada
+    const createdSubtasks = await TaskService.getSubtasks(taskData.taskId);
+    if (createdSubtasks && createdSubtasks.length > 0) {
+      const { embed: subtaskEmbed, components: subtaskComponents } = renderSubtasksChecklist({ title: taskData.title }, createdSubtasks);
+      await targetSendChannel.send({ embeds: [subtaskEmbed], components: subtaskComponents });
+    }
+
+    // Update sourceChannelId di DB task agar saat ditekan 'Selesai' / reminder terkirim, bot tahu thread mana yang dituju
+    if (thread) {
+      await prisma.task.update({
+        where: { id: taskData.taskId },
+        data: { sourceChannelId: thread.id }
+      }).catch(() => null);
+
+      // Notifikasi bersih di inbox-tugas agar user tahu thread telah dibuat (auto-delete 10 detik)
+      const briefNotice = await targetTextChannel.send({
+        content: `🔁 **Tugas Berulang Terbit!** Buka thread <#${thread.id}> untuk melihat checklist & detail tugas **${taskData.title}**.\n*(Pesan ini otomatis dihapus dalam 10 detik)*`
+      }).catch(() => null);
+
+      if (briefNotice) {
+        setTimeout(async () => {
+          await briefNotice.delete().catch(() => null);
+        }, 10000);
+      }
+    }
+
+    // Perbarui Live Radar Dashboard
+    await GuildService.updateRadarDashboard(guild);
+    return thread;
+  } catch (postErr) {
+    logger.error({ postErr }, 'Gagal postTaskToGuildThread');
+    return null;
+  }
 }
 
 client.on('interactionCreate', async (interaction) => {
@@ -2113,7 +2360,7 @@ client.on('interactionCreate', async (interaction) => {
           'BIWEEKLY': '🗓️ Setiap 2 Minggu'
         };
 
-        const recurring = await TaskService.createRecurringTask({
+        const { recurring, initialTask, firstDueAt } = await TaskService.createRecurringTask({
           discordId: interaction.user.id,
           username: interaction.user.username,
           guildId: interaction.guildId || undefined,
@@ -2130,22 +2377,48 @@ client.on('interactionCreate', async (interaction) => {
           deadlineMinute: extracted.deadlineMinute
         });
 
+        // Buat thread & kirim kartu tugas interaktif langsung di server jika dijalankan di guild!
+        let threadText = '';
+        if (initialTask && interaction.guildId) {
+          const thread = await postTaskToGuildThread(client, {
+            taskId: initialTask.id,
+            task: initialTask,
+            title: initialTask.title,
+            description: initialTask.description,
+            courseName: initialTask.courseId,
+            linkUrl: initialTask.linkUrl,
+            dueAt: initialTask.dueAt,
+            priority: initialTask.priority,
+            taskType: initialTask.taskType,
+            assignedUserIds: initialTask.assignedUserIds,
+            subtasks: extracted.subtasks,
+            discordId: interaction.user.id,
+            guildDiscordId: interaction.guildId
+          });
+          if (thread) {
+            threadText = `\n🧵 **Thread Tugas Aktif:** <#${thread.id}> (Buka thread untuk checklist & aksi)\n`;
+          }
+        }
+
         const scheduleText = extracted.repeatPattern === 'DAILY'
           ? `Setiap hari jam ${String(extracted.deadlineHour).padStart(2, '0')}:${String(extracted.deadlineMinute).padStart(2, '0')} WIB`
           : `${patternLabel[extracted.repeatPattern] || extracted.repeatPattern}, ${dayNames[extracted.dayOfWeek ?? 5]} jam ${String(extracted.deadlineHour).padStart(2, '0')}:${String(extracted.deadlineMinute).padStart(2, '0')} WIB`;
 
-        const nextRunText = `<t:${Math.floor(recurring.nextRunAt.getTime() / 1000)}:F> (<t:${Math.floor(recurring.nextRunAt.getTime() / 1000)}:R>)`;
+        const firstDueText = `<t:${Math.floor(firstDueAt.getTime() / 1000)}:F> (<t:${Math.floor(firstDueAt.getTime() / 1000)}:R>)`;
+        const nextCycleText = `<t:${Math.floor(recurring.nextRunAt.getTime() / 1000)}:F> (<t:${Math.floor(recurring.nextRunAt.getTime() / 1000)}:R>)`;
 
         const embed = new EmbedBuilder()
-          .setTitle('🔁 Tugas Berulang Berhasil Dibuat!')
+          .setTitle('🔁 Tugas Berulang Aktif & Thread Dibuat!')
           .setDescription(
             `📌 **Judul:** ${extracted.title}\n` +
             (extracted.courseName ? `📚 **Mata Kuliah:** ${extracted.courseName}\n` : '') +
             `🔄 **Jadwal:** ${scheduleText}\n` +
-            `⏰ **Tugas Berikutnya:** ${nextRunText}\n` +
+            `⏰ **Deadline Siklus Ini:** ${firstDueText}\n` +
+            `🗓️ **Siklus Berikutnya:** ${nextCycleText}\n` +
             `🔥 **Prioritas:** ${extracted.priority}\n` +
             (extracted.subtasks.length > 0 ? `📋 **Sub-tugas Template:** ${extracted.subtasks.length} item\n` : '') +
-            `\n*Tugas akan otomatis dibuat sesuai jadwal. Kamu akan mendapat DM notifikasi setiap kali tugas baru dibuat.*`
+            threadText +
+            `\n*Tugas periode pertama sudah dibuat di server lengkap dengan thread dan checklist! Siklus selanjutnya akan otomatis dibuat sesuai jadwal.*`
           )
           .setColor('#9B59B6')
           .setFooter({ text: `ID: ${recurring.id} • Gunakan /repeat delete untuk menghapus` })
