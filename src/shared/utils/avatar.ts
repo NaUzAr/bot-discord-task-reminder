@@ -41,30 +41,19 @@ export function getDiscordDefaultAvatar(discordId: string): string {
 }
 
 /**
- * Fetches real Discord avatar URL from Discord Client / REST API if available.
- * Falls back to Discord default avatar or initials SVG.
+ * Fetches real Discord avatar URL via our secure same-origin proxy endpoint.
+ * This guarantees zero CORS/CSP errors, zero ad-blocker issues, and always delivers
+ * either the actual Discord avatar or a vibrant initials SVG.
  */
 export async function getDiscordAvatarUrl(
   discordId: string,
   username: string,
-  client?: any
+  _client?: any
 ): Promise<string> {
-  if (client && client.isReady && client.isReady() && /^\d{16,20}$/.test(discordId)) {
-    try {
-      const user = await client.users.fetch(discordId);
-      if (user) {
-        return user.displayAvatarURL({ extension: 'png', size: 128 });
-      }
-    } catch {
-      // User might not be cached or rate-limited
-    }
-  }
-
-  // Fallback to Discord default avatar if discordId is a valid snowflake
   if (/^\d{16,20}$/.test(discordId)) {
-    return getDiscordDefaultAvatar(discordId);
+    return `/api/avatar/${discordId}?u=${encodeURIComponent(username)}`;
   }
 
-  // Fallback to offline initials avatar
+  // Fallback to offline initials avatar for mock/demo IDs
   return generateInitialsAvatar(username);
 }

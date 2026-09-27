@@ -28,6 +28,8 @@ export function startWebServer(client?: Client) {
         },
       },
       crossOriginEmbedderPolicy: false,
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+      referrerPolicy: { policy: 'no-referrer-when-downgrade' },
     })
   );
 

@@ -49,6 +49,51 @@ export function createApiRouter(client?: Client) {
     }
   }
 
+  // 0. Avatar Proxy Endpoint (Aman, cepat, dan anti-blokir untuk foto profil Discord)
+  router.get('/avatar/:discordId', async (req: Request, res: Response) => {
+    const rawId = req.params.discordId;
+    const discordId = Array.isArray(rawId) ? rawId[0] : String(rawId || '');
+    const username = (req.query.u as string) || (req.query.username as string) || 'User';
+
+    try {
+      let targetAvatarUrl = '';
+      if (client && client.isReady() && /^\d{16,20}$/.test(discordId)) {
+        try {
+          const user = await client.users.fetch(discordId);
+          if (user) {
+            targetAvatarUrl = user.displayAvatarURL({ extension: 'png', size: 128 });
+          }
+        } catch {
+          // Abaikan jika fetch Discord gagal
+        }
+      }
+
+      if (!targetAvatarUrl && /^\d{16,20}$/.test(discordId)) {
+        targetAvatarUrl = `https://cdn.discordapp.com/embed/avatars/${Number((BigInt(discordId) >> 22n) % 6n)}.png`;
+      }
+
+      if (targetAvatarUrl) {
+        const fetchRes = await fetch(targetAvatarUrl);
+        if (fetchRes.ok) {
+          const contentType = fetchRes.headers.get('content-type') || 'image/png';
+          const arrayBuf = await fetchRes.arrayBuffer();
+          res.setHeader('Content-Type', contentType);
+          res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=43200');
+          return res.send(Buffer.from(arrayBuf));
+        }
+      }
+    } catch (proxyErr) {
+      logger.warn({ proxyErr, discordId }, 'Avatar proxy fallback to SVG');
+    }
+
+    // Fallback: Kirim SVG Initials
+    const svgData = generateInitialsAvatar(username);
+    const svgString = decodeURIComponent(svgData.replace('data:image/svg+xml;utf8,', ''));
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.send(svgString);
+  });
+
   // 1. Status Sistem & Bot (Live Metrics)
   router.get('/status', async (_req: Request, res: Response) => {
     try {
