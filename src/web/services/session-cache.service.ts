@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import Redis from 'ioredis';
 import { env } from '../../config/env';
 import { logger } from '../../shared/utils/logger';
+import { generateInitialsAvatar } from '../../shared/utils/avatar';
 
 export interface CachedUserSession {
   token: string;
@@ -88,7 +89,7 @@ class SessionCacheService {
       discordId: user.discordId,
       username: user.username,
       role: user.role,
-      avatarUrl: user.avatarUrl || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(user.username)}`,
+      avatarUrl: user.avatarUrl || generateInitialsAvatar(user.username),
       rememberMe,
       createdAt: now,
       expiresAt,

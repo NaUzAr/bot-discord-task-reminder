@@ -10,6 +10,7 @@ import { sseService } from '../services/sse.service';
 import { ExportService } from '../../modules/export/export.service';
 import { AIService } from '../../modules/ai/ai.service';
 import { AuditLogService } from '../services/audit-log.service';
+import { generateInitialsAvatar } from '../../shared/utils/avatar';
 
 export function createApiRouter(client?: Client) {
   const router = Router();
@@ -625,7 +626,7 @@ export function createApiRouter(client?: Client) {
         level: Math.floor(u.xp / 100) + 1,
         completedTasks: u._count.tasks,
         focusSessions: u._count.focusSessions,
-        avatarUrl: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(u.username)}`,
+        avatarUrl: generateInitialsAvatar(u.username),
       }));
 
       return res.json({ leaderboard: formatted });

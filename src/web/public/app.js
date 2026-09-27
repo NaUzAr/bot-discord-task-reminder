@@ -235,9 +235,12 @@ function renderUserProfile() {
   if (navAdmin) navAdmin.style.display = u.role === 'ADMIN' ? 'flex' : 'none';
   if (mobileNavAdmin) mobileNavAdmin.style.display = u.role === 'ADMIN' ? 'flex' : 'none';
 
-  if (u.avatarUrl) {
-    el.userAvatar.src = u.avatarUrl;
-  }
+  const fallbackAvatar = generateInitialsAvatar(u.username || 'User');
+  el.userAvatar.src = u.avatarUrl || fallbackAvatar;
+  el.userAvatar.onerror = function() {
+    this.onerror = null;
+    this.src = fallbackAvatar;
+  };
 }
 
 // ==========================================
@@ -779,7 +782,7 @@ async function loadLeaderboard() {
     el.podiumSection.innerHTML = top3.map((u, i) => `
       <div class="podium-card rank-${u.rank}">
         <span class="podium-badge">${podiumBadges[i] || '🎖️'}</span>
-        <img class="podium-avatar" src="${u.avatarUrl}" alt="Avatar">
+        <img class="podium-avatar" src="${u.avatarUrl || generateInitialsAvatar(u.username)}" alt="Avatar" onerror="this.onerror=null; this.src=generateInitialsAvatar('${escapeHtml(u.username)}');">
         <h4 class="podium-name">${escapeHtml(u.username)}</h4>
         <span class="podium-xp">⚡ ${u.xp} XP</span>
         <span style="font-size: 0.75rem; color: var(--text-dim); margin-top: 0.25rem;">🔥 ${u.streak} Hari Streak</span>
@@ -792,7 +795,7 @@ async function loadLeaderboard() {
         <td><strong>#${u.rank}</strong></td>
         <td>
           <div style="display: flex; align-items: center; gap: 0.6rem;">
-            <img src="${u.avatarUrl}" width="28" height="28" style="border-radius: 50%;">
+            <img src="${u.avatarUrl || generateInitialsAvatar(u.username)}" width="28" height="28" style="border-radius: 50%;" alt="Avatar" onerror="this.onerror=null; this.src=generateInitialsAvatar('${escapeHtml(u.username)}');">
             <span>${escapeHtml(u.username)}</span>
           </div>
         </td>
@@ -1140,6 +1143,26 @@ function escapeHtml(str) {
     "'": '&#39;',
     '"': '&quot;'
   }[tag] || tag));
+}
+
+function generateInitialsAvatar(name) {
+  const clean = (name || 'User').trim();
+  const initial = clean.charAt(0).toUpperCase() || 'U';
+  const gradients = [
+    ['#4F46E5', '#7C3AED'],
+    ['#2563EB', '#06B6D4'],
+    ['#059669', '#10B981'],
+    ['#D97706', '#F59E0B'],
+    ['#E11D48', '#FB7185'],
+    ['#7C3AED', '#C026D3'],
+    ['#0D9488', '#14B8A6'],
+    ['#3B82F6', '#8B5CF6'],
+  ];
+  let hash = 0;
+  for (let i = 0; i < clean.length; i++) hash = clean.charCodeAt(i) + ((hash << 5) - hash);
+  const [c1, c2] = gradients[Math.abs(hash) % gradients.length];
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="${c1}"/><stop offset="100%" stop-color="${c2}"/></linearGradient></defs><circle cx="50" cy="50" r="50" fill="url(#g)"/><text x="50" y="55" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="44" font-weight="700" fill="#ffffff" text-anchor="middle" dominant-baseline="middle">${initial}</text></svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 
 function debounce(func, wait) {

@@ -3,6 +3,7 @@ import { env } from '../../config/env';
 import { prisma } from '../../database/prisma';
 import { logger } from '../../shared/utils/logger';
 import { sessionCache } from '../services/session-cache.service';
+import { generateInitialsAvatar } from '../../shared/utils/avatar';
 
 export const authRouter = Router();
 
@@ -278,7 +279,7 @@ authRouter.get('/registered-users', async (_req: Request, res: Response) => {
       hasOauthConfigured: !!(env.CLIENT_ID && env.DISCORD_CLIENT_SECRET),
       users: users.map((u) => ({
         ...u,
-        avatarUrl: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(u.username)}`,
+        avatarUrl: generateInitialsAvatar(u.username),
       })),
     });
   } catch (err) {
