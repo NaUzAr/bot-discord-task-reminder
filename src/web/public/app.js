@@ -992,8 +992,33 @@ function updateFocusTaskDropdown(tasks) {
 // 5. Modals & Task Creation
 // ==========================================
 function setupModals() {
+  // Helper memuat pilihan server Discord
+  async function loadGuildOptions() {
+    const guildSelect = document.getElementById('task-target-guild');
+    if (!guildSelect) return;
+    try {
+      const res = await fetch('/api/guilds');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.guilds) && data.guilds.length > 0) {
+        const currentVal = guildSelect.value;
+        let html = '<option value="PERSONAL">🔒 Tugas Pribadi (Notifikasi DM, Tanpa Thread Server)</option>';
+        data.guilds.forEach(g => {
+          html += `<option value="${g.discordGuildId}">🌐 ${escapeHtml(g.name)} ${g.hasInbox ? '(#inbox-tugas)' : ''}</option>`;
+        });
+        guildSelect.innerHTML = html;
+        if (currentVal && Array.from(guildSelect.options).some(o => o.value === currentVal)) {
+          guildSelect.value = currentVal;
+        }
+      }
+    } catch (e) {
+      console.error('Error loadGuildOptions:', e);
+    }
+  }
+
   // Create Task Modal
   el.btnOpenCreateModal.addEventListener('click', () => {
+    loadGuildOptions();
     el.modalCreateTask.classList.add('show');
   });
 
@@ -1010,6 +1035,7 @@ function setupModals() {
     const dueAt = document.getElementById('task-due').value || null;
     const description = document.getElementById('task-desc').value.trim() || null;
     const linkUrl = document.getElementById('task-link').value.trim() || null;
+    const targetGuildId = document.getElementById('task-target-guild')?.value || 'PERSONAL';
     const subtasksText = document.getElementById('task-subtasks-input')?.value.trim() || '';
     const subtasks = subtasksText ? subtasksText.split('\n').map(s => s.trim()).filter(Boolean) : [];
 
@@ -1017,7 +1043,7 @@ function setupModals() {
       const res = await fetch('/api/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, priority, taskType, courseName, dueAt, description, linkUrl, subtasks }),
+        body: JSON.stringify({ title, priority, taskType, courseName, dueAt, description, linkUrl, subtasks, targetGuildId }),
       });
 
       if (res.ok) {

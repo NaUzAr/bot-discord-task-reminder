@@ -4,6 +4,9 @@ import { Task } from '@prisma/client';
 import { reminderQueue } from '../../workers/queue';
 import { subMinutes } from 'date-fns';
 import { logger } from '../../shared/utils/logger';
+import { Client, TextChannel, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } from 'discord.js';
+import { generateGoogleCalendarUrl } from '../../shared/utils/calendar';
+import { GuildService } from '../guild/guild.service';
 
 export class TaskService {
   static async getOrCreateUser(discordId: string, username: string) {
@@ -894,6 +897,220 @@ export class TaskService {
     }
 
     return { createdTasks, errors };
+  }
+
+  /**
+   * Mengirim tugas ke Discord: membuat/menggunakan thread di #inbox-tugas server terpilih,
+   * mengirimkan kartu tugas interaktif, dan memperbarui Live Deadline Radar.
+   */
+  static async dispatchTaskToDiscord(
+    taskId: string,
+    client: Client,
+    targetDiscordGuildId?: string
+  ): Promise<boolean> {
+    try {
+      const task = await prisma.task.findUnique({
+        where: { id: taskId },
+        include: { user: true, guild: true, subtasks: { orderBy: { position: 'asc' } } }
+      });
+      if (!task) return false;
+
+      // Cari guild tujuan
+      if (!targetDiscordGuildId && !task.guild?.discordGuildId) {
+        logger.info(`Tugas ${taskId} dibuat sebagai tugas pribadi (tanpa thread server)`);
+        return false;
+      }
+
+      if (targetDiscordGuildId === 'PERSONAL' || targetDiscordGuildId === 'none') {
+        logger.info(`Tugas ${taskId} ditandai sebagai tugas pribadi (tanpa thread server)`);
+        return false;
+      }
+
+      let dbGuild = null;
+      if (targetDiscordGuildId) {
+        dbGuild = await prisma.guild.findFirst({
+          where: {
+            OR: [
+              { discordGuildId: targetDiscordGuildId },
+              { id: targetDiscordGuildId }
+            ]
+          }
+        });
+      } else if (task.guild?.discordGuildId) {
+        dbGuild = await prisma.guild.findUnique({ where: { discordGuildId: task.guild.discordGuildId } });
+      }
+
+      if (!dbGuild || !dbGuild.inboxChannelId) {
+        logger.info(`Tugas ${taskId}: Guild tidak memiliki inboxChannelId terkonfigurasi`);
+        return false;
+      }
+
+      const discordGuild = client.guilds.cache.get(dbGuild.discordGuildId);
+      if (!discordGuild) {
+        logger.warn(`Guild ${dbGuild.discordGuildId} tidak ditemukan di cache bot`);
+        return false;
+      }
+
+      const inboxChannel = discordGuild.channels.cache.get(dbGuild.inboxChannelId) as TextChannel | undefined;
+      if (!inboxChannel || !('threads' in inboxChannel)) {
+        logger.warn(`Inbox channel ${dbGuild.inboxChannelId} tidak valid di guild ${discordGuild.name}`);
+        return false;
+      }
+
+      const isGroup = task.taskType === 'GROUP';
+      const threadPrefix = isGroup ? '👥・[Kelompok]' : '📚・[Individu]';
+      const courseOrTitle = task.courseId || task.title;
+      const threadName = `${threadPrefix} ${courseOrTitle.slice(0, 75)}`;
+
+      let thread = null;
+      try {
+        const activeThreads = await inboxChannel.threads.fetchActive().catch(() => null);
+        if (activeThreads) {
+          thread = activeThreads.threads.find(
+            t => !t.archived && t.name.toLowerCase().includes(courseOrTitle.toLowerCase())
+          );
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Gagal fetch active threads');
+      }
+
+      if (!thread) {
+        try {
+          thread = await inboxChannel.threads.create({
+            name: threadName,
+            autoArchiveDuration: 1440,
+            reason: 'TaskFlow OS Task Created via Web Dashboard'
+          });
+        } catch (threadErr) {
+          logger.warn({ threadErr }, 'Gagal membuat thread di Discord');
+        }
+      }
+
+      const targetSendChannel = thread || inboxChannel;
+
+      // Tambahkan anggota ke thread
+      if (thread) {
+        const memberIds = task.assignedUserIds && task.assignedUserIds.length > 0
+          ? task.assignedUserIds
+          : [task.user.discordId];
+        for (const uid of memberIds) {
+          if (/^\d{16,20}$/.test(uid)) {
+            await thread.members.add(uid).catch(() => null);
+          }
+        }
+      }
+
+      // Siapkan deadline text
+      const deadlineText = task.dueAt
+        ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)`
+        : 'Tidak ada batas waktu';
+
+      // Siapkan tombol aksi
+      const primaryButtons = [
+        new ButtonBuilder()
+          .setCustomId(`task_done_${task.id}`)
+          .setLabel('Selesai')
+          .setStyle(ButtonStyle.Success)
+          .setEmoji('✅'),
+        new ButtonBuilder()
+          .setCustomId(`task_edit_${task.id}`)
+          .setLabel('Edit')
+          .setStyle(ButtonStyle.Secondary)
+          .setEmoji('✏️'),
+        new ButtonBuilder()
+          .setCustomId(`task_breakdown_${task.id}`)
+          .setLabel('AI Breakdown')
+          .setStyle(ButtonStyle.Primary)
+          .setEmoji('🧩'),
+        new ButtonBuilder()
+          .setCustomId(`task_snooze_${task.id}_30`)
+          .setLabel('Tunda 30m')
+          .setStyle(ButtonStyle.Secondary)
+          .setEmoji('💤')
+      ];
+
+      const linkButtons = [];
+      if (task.dueAt) {
+        const gcalUrl = generateGoogleCalendarUrl(task.title, task.dueAt, task.linkUrl, task.description);
+        linkButtons.push(
+          new ButtonBuilder()
+            .setLabel('Google Calendar')
+            .setStyle(ButtonStyle.Link)
+            .setURL(gcalUrl)
+            .setEmoji('📅')
+        );
+      }
+
+      if (task.linkUrl) {
+        linkButtons.push(
+          new ButtonBuilder()
+            .setLabel('Buka Link')
+            .setStyle(ButtonStyle.Link)
+            .setURL(task.linkUrl)
+            .setEmoji('🔗')
+        );
+      }
+
+      const actionRows: ActionRowBuilder<ButtonBuilder>[] = [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(primaryButtons)
+      ];
+      if (linkButtons.length > 0) {
+        actionRows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(linkButtons));
+      }
+
+      const embedColor = isGroup ? '#9B59B6' : '#00E5FF';
+      const embedTitle = isGroup
+        ? '👥 Task Kelompok (Dibuat via Web Dashboard)'
+        : '👤 Task Individu (Dibuat via Web Dashboard)';
+
+      const memberListText = task.assignedUserIds && task.assignedUserIds.length > 0
+        ? task.assignedUserIds.map(id => (/^\d{16,20}$/.test(id) ? `<@${id}>` : id)).join(', ')
+        : `<@${task.user.discordId}>`;
+
+      let subtaskText = '';
+      if (task.subtasks && task.subtasks.length > 0) {
+        subtaskText = '\n\n**Subtasks / Checklist:**\n' +
+          task.subtasks.map(s => `• ⬜ ${s.title}`).join('\n');
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle(embedTitle)
+        .setDescription(
+          `### **${task.title}**\n\n` +
+          `🏷️ **Tipe:** **${isGroup ? '👥 Tugas Kelompok' : '👤 Tugas Individu'}**\n` +
+          (task.courseId ? `📚 **Mata Kuliah:** ${task.courseId}\n` : '') +
+          `👥 **Anggota:** ${memberListText}\n` +
+          `⏰ **Deadline:** ${deadlineText}\n` +
+          `🔥 **Prioritas:** ${task.priority}` +
+          (task.description ? `\n\n📝 **Catatan:** ${task.description}` : '') +
+          subtaskText
+        )
+        .setColor(embedColor)
+        .setFooter({ text: `TaskFlow OS Web Sync • ID: ${task.id.slice(-6)}` });
+
+      const cardMsg = await targetSendChannel.send({
+        embeds: [embed],
+        components: actionRows
+      });
+
+      // Update task dengan ID channel thread & ID message
+      await prisma.task.update({
+        where: { id: task.id },
+        data: {
+          guildId: dbGuild.id,
+          sourceChannelId: targetSendChannel.id,
+          sourceMessageId: cardMsg.id,
+        }
+      });
+
+      // Update Live Radar Dashboard di channel radar guild
+      await GuildService.updateRadarDashboard(discordGuild);
+      logger.info(`Tugas "${task.title}" berhasil diposting ke thread Discord: ${targetSendChannel.name} di guild ${discordGuild.name}`);
+      return true;
+    } catch (err) {
+      logger.error({ err, taskId }, 'Gagal dispatch task ke Discord');
+      return false;
+    }
   }
 }
 

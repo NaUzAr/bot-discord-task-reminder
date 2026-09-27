@@ -346,11 +346,37 @@ export function createApiRouter(client?: Client) {
     }
   });
 
+  // 3b. Daftar Server Discord yang Terhubung (untuk pilihan tujuan thread & radar)
+  router.get('/guilds', async (_req: Request, res: Response) => {
+    try {
+      const dbGuilds = await prisma.guild.findMany({
+        orderBy: { createdAt: 'desc' },
+      });
+
+      const guilds = dbGuilds.map((g) => {
+        const cached = client?.guilds.cache.get(g.discordGuildId);
+        return {
+          id: g.id,
+          discordGuildId: g.discordGuildId,
+          name: cached?.name || g.name || 'Discord Server',
+          iconUrl: cached?.iconURL({ size: 64 }) || null,
+          hasInbox: !!g.inboxChannelId,
+          hasRadar: !!g.radarChannelId,
+        };
+      });
+
+      return res.json({ guilds });
+    } catch (err) {
+      logger.error({ err }, 'Error fetch /api/guilds');
+      return res.status(500).json({ error: 'Gagal mengambil daftar server' });
+    }
+  });
+
   // 4. Buat Tugas Baru dari Web
   router.post('/tasks', async (req: Request, res: Response) => {
     try {
       const session = await getSessionUser(req);
-      const { title, description, dueAt, priority, taskType, linkUrl, subtasks, courseName, courseId } = req.body;
+      const { title, description, dueAt, priority, taskType, linkUrl, subtasks, courseName, courseId, targetGuildId } = req.body;
 
       if (!title || typeof title !== 'string' || title.trim().length === 0) {
         return res.status(400).json({ error: 'Judul tugas wajib diisi' });
@@ -373,11 +399,25 @@ export function createApiRouter(client?: Client) {
         });
       }
 
+      // Cari guild tujuan jika dipilih
+      let chosenDbGuild = null;
+      if (targetGuildId && targetGuildId !== 'PERSONAL' && targetGuildId !== 'none') {
+        chosenDbGuild = await prisma.guild.findFirst({
+          where: {
+            OR: [
+              { id: targetGuildId },
+              { discordGuildId: targetGuildId },
+            ],
+          },
+        });
+      }
+
       const parsedDueAt = dueAt ? new Date(dueAt) : null;
 
       const task = await prisma.task.create({
         data: {
           userId: targetUser.id,
+          guildId: chosenDbGuild ? chosenDbGuild.id : null,
           title: title.trim(),
           description: description?.trim() || null,
           dueAt: parsedDueAt,
@@ -448,6 +488,15 @@ export function createApiRouter(client?: Client) {
         taskId: task.id,
         metadata: { title: task.title, course: task.courseId, priority: task.priority },
       });
+
+      // Auto-dispatch ke Discord (Thread di #inbox-tugas & Live Radar) jika memilih server
+      if (client && client.isReady() && chosenDbGuild) {
+        try {
+          await TaskService.dispatchTaskToDiscord(task.id, client, chosenDbGuild.discordGuildId);
+        } catch (dErr) {
+          logger.error({ dErr, taskId: task.id }, 'Gagal auto-dispatch task ke Discord setelah dibuat via Web');
+        }
+      }
 
       sseService.broadcast('task:changed', { action: 'created', taskId: task.id });
       return res.status(201).json({ success: true, task });
