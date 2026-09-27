@@ -5,7 +5,7 @@ import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilde
 import { prisma } from '../database/prisma';
 import { generateGoogleCalendarUrl } from '../shared/utils/calendar';
 
-// Worker menggunakan client Discord sendiri untuk mengirim notifikasi thread & DM
+// 🔄 BullMQ Worker: Menggunakan client Discord untuk notifikasi thread & DM
 const client = new Client({ 
   intents: [
     GatewayIntentBits.Guilds,
