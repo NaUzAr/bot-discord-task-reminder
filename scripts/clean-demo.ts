@@ -1,6 +1,6 @@
-import { prisma } from '../src/database/prisma';
-import { env } from '../src/config/env';
-import { logger } from '../src/shared/utils/logger';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
 
 async function cleanDemoData() {
   console.log('🧹 Memulai pembersihan data akun & tugas demo...');
@@ -27,8 +27,8 @@ async function cleanDemoData() {
   console.log(`✅ Berhasil menghapus ${deletedUsers.count} akun mahasiswa demo.`);
 
   // 3. Update status ADMIN untuk akun Discord asli
-  const adminIds = env.ADMIN_DISCORD_IDS
-    ? env.ADMIN_DISCORD_IDS.split(',').map((id: string) => id.trim()).filter(Boolean)
+  const adminIds = process.env.ADMIN_DISCORD_IDS
+    ? process.env.ADMIN_DISCORD_IDS.split(',').map((id: string) => id.trim()).filter(Boolean)
     : ['388612656678043649'];
 
   const updatedAdmins = await prisma.user.updateMany({
@@ -59,8 +59,7 @@ async function cleanDemoData() {
 
 cleanDemoData()
   .catch((err) => {
-    logger.error({ err }, 'Gagal membersihkan data demo');
-    console.error(err);
+    console.error('Gagal membersihkan data demo:', err);
     process.exit(1);
   })
   .finally(async () => {
