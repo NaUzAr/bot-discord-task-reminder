@@ -506,6 +506,82 @@ Instruksi:
       `• **💡 Rekomendasi:** Pertahankan ritme belajarmu dengan memecah tugas besar menjadi sub-tugas kecil sejak hari pertama tugas diberikan.\n` +
       `• **🎯 Target Minggu Depan:** Tingkatkan durasi Deep Work dan selesaikan tugas sebelum H-1 deadline! 🚀`;
   }
+
+  /**
+   * 💬 AI Natural Language Query Assistant
+   * Menjawab pertanyaan santai pengguna tentang tugas, deadline, dan progres berdasarkan database tugas
+   */
+  static async answerTaskQuery(
+    query: string,
+    tasks: {
+      id: string;
+      title: string;
+      taskType: string;
+      priority: string;
+      status: string;
+      dueAt: Date | null;
+      courseId?: string | null;
+      assignedUserIds?: string[];
+      description?: string | null;
+      subtasks?: { title: string; status: string }[];
+    }[],
+    userStats?: { username: string; xp: number; level: number; streak: number; totalFocusMinutes: number } | null,
+    timezone: string = 'Asia/Jakarta'
+  ): Promise<string> {
+    const nowLocal = new Date().toLocaleString('id-ID', { timeZone: timezone, dateStyle: 'full', timeStyle: 'short' });
+
+    const formattedTasks = tasks.map((t, i) => {
+      const dl = t.dueAt 
+        ? t.dueAt.toLocaleString('id-ID', { timeZone: timezone, dateStyle: 'medium', timeStyle: 'short' })
+        : 'Tanpa deadline';
+      const typeStr = t.taskType === 'GROUP' ? '👥 Tugas Kelompok' : '👤 Tugas Individu';
+      const course = t.courseId ? ` [Matkul: ${t.courseId}]` : '';
+      const sub = t.subtasks && t.subtasks.length > 0 
+        ? `\n   Subtasks: ` + t.subtasks.map(s => `${s.status === 'DONE' ? '✅' : '⬜'} ${s.title}`).join(', ')
+        : '';
+      return `${i + 1}. "${t.title}" (${typeStr}${course}) | Status: ${t.status} | Deadline: ${dl} | Prioritas: ${t.priority}${sub}`;
+    }).join('\n') || 'Tidak ada tugas yang tercatat saat ini.';
+
+    const statsInfo = userStats
+      ? `User: ${userStats.username} | Level: ${userStats.level} | XP: ${userStats.xp} | Streak: ${userStats.streak} hari | Total Jam Fokus: ${(userStats.totalFocusMinutes / 60).toFixed(1)} jam`
+      : 'User belum memiliki catatan fokus.';
+
+    const prompt = `
+Kamu adalah TaskFlow AI Assistant — asisten cerdas, santai, dan sangat membantu di server Discord.
+Kamu memiliki akses langsung ke database tugas dan produktivitas pengguna saat ini.
+
+Waktu Saat Ini: ${nowLocal} (WIB)
+Profil Pengguna:
+${statsInfo}
+
+Data Tugas Pengguna (Aktif & Terjadwal):
+${formattedTasks}
+
+Pertanyaan Pengguna:
+"${query}"
+
+Instruksi:
+1. Jawab pertanyaan pengguna secara akurat, lugas, dan relevan berdasarkan data tugas di atas.
+2. Gunakan gaya bahasa Indonesia yang kasual, cerdas, bersahabat, dan memotivasi (seperti teman belajar yang suportif).
+3. Jika ditanya tentang tugas paling mendesak/mepet, sebutkan nama tugas, deadline, dan rekomendasikan untuk segera dikerjakan.
+4. Jika ditanya tentang tugas kelompok, jelaskan siapa saja anggota atau progres sub-tugas yang belum selesai.
+5. Format jawaban dengan Markdown Discord (bullet points, bold, emoji) agar rapi, menarik, dan enak dibaca sekilas.
+6. Buat jawaban padat dan ringkas (tidak bertele-tele, maksimal 2-3 paragraf/poin).
+`;
+
+    for (const modelName of CANDIDATE_MODELS) {
+      try {
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        const text = result.response.text();
+        if (text && text.trim().length > 0) return text.trim();
+      } catch (err: any) {
+        logger.warn({ model: modelName, err: err?.message || err }, 'Gagal menjawab task query, trying fallback...');
+      }
+    }
+
+    return `Maaf, aku sedang kesulitan menganalisis datamu saat ini. Coba cek tugas aktifmu langsung dengan perintah \`/tasks\` atau \`/today\` ya! ☕`;
+  }
 }
 
 

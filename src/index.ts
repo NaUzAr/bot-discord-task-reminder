@@ -1,11 +1,11 @@
-import { 
-  Client, 
-  GatewayIntentBits, 
-  EmbedBuilder, 
-  ActionRowBuilder, 
-  ButtonBuilder, 
-  ButtonStyle, 
-  TextChannel, 
+import {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  TextChannel,
   AttachmentBuilder,
   ModalBuilder,
   TextInputBuilder,
@@ -26,7 +26,7 @@ import { ExportService } from './modules/export/export.service';
 import { reminderQueue } from './workers/queue';
 
 // 🔄 Menyalakan BullMQ Worker secara otomatis saat bot berjalan!
-import './workers/reminder.worker'; 
+import './workers/reminder.worker';
 
 const client = new Client({
   intents: [
@@ -71,6 +71,46 @@ client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (!message.guild) return;
 
+  // 🤖 AI Natural Language Query via Mention (@TaskFlow <pertanyaan>)
+  if (client.user && message.mentions.has(client.user)) {
+    const cleanQuery = message.content.replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '').trim();
+    if (cleanQuery.length >= 3) {
+      try {
+        await (message.channel as TextChannel).sendTyping().catch(() => null);
+        const { tasks, userStats } = await TaskService.getTasksForAIQuery(
+          message.author.id,
+          message.guild.id
+        );
+        const answer = await AIService.answerTaskQuery(cleanQuery, tasks, userStats);
+
+        const replyEmbed = new EmbedBuilder()
+          .setTitle('🤖 TaskFlow AI Assistant')
+          .setDescription(answer)
+          .setColor('#5865F2')
+          .setFooter({ text: 'TaskFlow OS • Tanya tugas kapan saja dengan mention @bot atau /ask' })
+          .setTimestamp();
+
+        const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId('room_focus_25')
+            .setLabel('🎯 Mulai Fokus 25m')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId('room_focus_50')
+            .setLabel('🔥 Deep Work 50m')
+            .setStyle(ButtonStyle.Primary)
+        );
+
+        await message.reply({ embeds: [replyEmbed], components: [actionRow] });
+        return;
+      } catch (askErr) {
+        logger.error({ askErr }, 'Gagal merespon mention AI query');
+        await message.reply('❌ Maaf, aku sedang mengalami kendala saat membaca datamu. Coba gunakan perintah `/ask` ya!');
+        return;
+      }
+    }
+  }
+
   const channelName = (message.channel as TextChannel).name?.toLowerCase() || '';
   const isInbox = channelName.includes('inbox') || channelName.includes('tugas');
 
@@ -96,10 +136,10 @@ client.on('messageCreate', async (message) => {
 
     // 📸 Vision AI & 🎙️ Voice-to-Task: Cek apakah pengguna mengunggah gambar/screenshot atau voice note/audio
     const imageAttachment = message.attachments.find(att => att.contentType?.startsWith('image/'));
-    const audioAttachment = message.attachments.find(att => 
-      att.contentType?.startsWith('audio/') || 
-      att.name.endsWith('.ogg') || 
-      att.name.endsWith('.mp3') || 
+    const audioAttachment = message.attachments.find(att =>
+      att.contentType?.startsWith('audio/') ||
+      att.name.endsWith('.ogg') ||
+      att.name.endsWith('.mp3') ||
       att.name.endsWith('.wav') ||
       att.name.endsWith('.m4a')
     );
@@ -145,7 +185,7 @@ client.on('messageCreate', async (message) => {
         try {
           if (warnMsg) await warnMsg.delete().catch(() => null);
           await message.delete().catch(() => null);
-        } catch {}
+        } catch { }
       }, 8 * 1000);
       return;
     }
@@ -191,7 +231,7 @@ client.on('messageCreate', async (message) => {
       if (!thread) {
         try {
           const threadPrefix = isGroup ? '👥・[Kelompok]' : '📚・[Individu]';
-          const threadName = extracted.courseName 
+          const threadName = extracted.courseName
             ? `${threadPrefix} ${extracted.courseName}`
             : `${threadPrefix} ${extracted.title.slice(0, 75)}`;
 
@@ -230,8 +270,8 @@ client.on('messageCreate', async (message) => {
     await message.reactions.cache.get('👀')?.users.remove(client.user?.id);
     await message.react('✅');
 
-    const deadlineText = task.dueAt 
-      ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)` 
+    const deadlineText = task.dueAt
+      ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)`
       : 'Tidak ada batas waktu';
 
     const primaryButtons = [
@@ -287,8 +327,8 @@ client.on('messageCreate', async (message) => {
     }
 
     const embedColor = isGroup ? '#9B59B6' : '#00E5FF';
-    const embedTitle = isGroup 
-      ? '👥 Task Kelompok Terdeteksi dari Inbox!' 
+    const embedTitle = isGroup
+      ? '👥 Task Kelompok Terdeteksi dari Inbox!'
       : '👤 Task Individu Terdeteksi dari Inbox!';
 
     const memberListText = isGroup
@@ -389,8 +429,8 @@ function renderSubtasksChecklist(task: { title: string }, subtasks: any[]) {
     .setDescription(
       `📊 **Progress:** \`[${progressBar}]\` **${percent}%** (${doneCount}/${total} Selesai)\n\n` +
       subtaskLines +
-      (percent === 100 
-        ? '\n\n🎉 **Luar biasa! Seluruh sub-tugas telah selesai!** (+30 XP)\nTekan tombol `✅ Selesai` di atas jika tugas utama sudah rampung.' 
+      (percent === 100
+        ? '\n\n🎉 **Luar biasa! Seluruh sub-tugas telah selesai!** (+30 XP)\nTekan tombol `✅ Selesai` di atas jika tugas utama sudah rampung.'
         : '\n\n*Klik tombol di bawah untuk mencentang/membatalkan sub-tugas:*')
     )
     .setColor(percent === 100 ? '#00FF7F' : '#9B59B6')
@@ -537,8 +577,8 @@ client.on('interactionCreate', async (interaction) => {
               const priorityEmoji: Record<string, string> = { URGENT: '🚨', HIGH: '🔥', MEDIUM: '⚡', LOW: '🌱' };
 
               const remainingListText = remainingTasks.map((t, idx) => {
-                const dl = t.dueAt 
-                  ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R> (<t:${Math.floor(t.dueAt.getTime() / 1000)}:t>)` 
+                const dl = t.dueAt
+                  ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R> (<t:${Math.floor(t.dueAt.getTime() / 1000)}:t>)`
                   : 'Tanpa batas waktu';
                 const typeBadge = t.taskType === 'GROUP' ? '👥' : '👤';
                 const link = t.linkUrl ? ` | 🔗 [Link](${t.linkUrl})` : '';
@@ -817,7 +857,7 @@ client.on('interactionCreate', async (interaction) => {
       // Kirim juga kartu kontrol ini ke DM pengguna agar mudah diakses
       try {
         await interaction.user.send({ embeds: [focusEmbed], components: [controlButtons] });
-      } catch {}
+      } catch { }
       return;
     }
 
@@ -957,16 +997,16 @@ client.on('interactionCreate', async (interaction) => {
         try {
           const isGroup = updated.taskType === 'GROUP';
           const embedColor = isGroup ? '#3498DB' : '#00E5FF';
-          const embedTitle = isGroup 
-            ? '👥 Task Kelompok Terdeteksi dari Inbox!' 
+          const embedTitle = isGroup
+            ? '👥 Task Kelompok Terdeteksi dari Inbox!'
             : '👤 Task Individu Terdeteksi dari Inbox!';
 
           const memberListText = isGroup
             ? updated.assignedUserIds.map(id => `<@${id}>`).join(', ')
             : `<@${updated.userId}>`;
 
-          const deadlineFormatted = updated.dueAt 
-            ? `<t:${Math.floor(updated.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(updated.dueAt.getTime() / 1000)}:R>)` 
+          const deadlineFormatted = updated.dueAt
+            ? `<t:${Math.floor(updated.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(updated.dueAt.getTime() / 1000)}:R>)`
             : 'Tidak ada batas waktu';
 
           const cardEmbed = new EmbedBuilder()
@@ -1048,7 +1088,7 @@ client.on('interactionCreate', async (interaction) => {
                   .setURL(updated.linkUrl)
                   .setEmoji('🔗')
               );
-            } catch {}
+            } catch { }
           }
 
           const actionRows: ActionRowBuilder<ButtonBuilder>[] = [
@@ -1065,8 +1105,8 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
 
-      const dlStr = updated.dueAt 
-        ? `<t:${Math.floor(updated.dueAt.getTime() / 1000)}:F>` 
+      const dlStr = updated.dueAt
+        ? `<t:${Math.floor(updated.dueAt.getTime() / 1000)}:F>`
         : 'Tanpa deadline';
 
       await interaction.editReply(
@@ -1083,7 +1123,7 @@ client.on('interactionCreate', async (interaction) => {
       setTimeout(async () => {
         try {
           await interaction.deleteReply().catch(() => null);
-        } catch {}
+        } catch { }
       }, 4000);
       return;
     }
@@ -1221,8 +1261,8 @@ client.on('interactionCreate', async (interaction) => {
           }
         );
 
-        const deadlineText = task.dueAt 
-          ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)` 
+        const deadlineText = task.dueAt
+          ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)`
           : 'Tidak ada batas waktu';
 
         const embed = new EmbedBuilder()
@@ -1259,8 +1299,8 @@ client.on('interactionCreate', async (interaction) => {
               .setEmoji('🔗')
           );
         }
-        const contextRow = contextButtons.length > 0 
-          ? [new ActionRowBuilder<ButtonBuilder>().addComponents(contextButtons)] 
+        const contextRow = contextButtons.length > 0
+          ? [new ActionRowBuilder<ButtonBuilder>().addComponents(contextButtons)]
           : [];
 
         await interaction.editReply({ embeds: [embed], components: contextRow });
@@ -1302,10 +1342,10 @@ client.on('interactionCreate', async (interaction) => {
 
   if (interaction.commandName === 'task') {
     await interaction.deferReply();
-    
+
     const userInput = interaction.options.getString('input', true);
     const extracted = await AIService.extractTask(userInput);
-    
+
     if (!extracted) {
       await interaction.editReply('❌ Maaf, AI gagal memahami instruksimu. Coba gunakan kalimat yang lebih spesifik.');
       return;
@@ -1321,9 +1361,9 @@ client.on('interactionCreate', async (interaction) => {
           guildName: interaction.guild?.name
         }
       );
-      
-      const deadlineText = task.dueAt 
-        ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)` 
+
+      const deadlineText = task.dueAt
+        ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)`
         : 'Tidak ada batas waktu';
 
       const embed = new EmbedBuilder()
@@ -1355,8 +1395,8 @@ client.on('interactionCreate', async (interaction) => {
             .setEmoji('🔗')
         );
       }
-      const taskRow = taskButtons.length > 0 
-        ? [new ActionRowBuilder<ButtonBuilder>().addComponents(taskButtons)] 
+      const taskRow = taskButtons.length > 0
+        ? [new ActionRowBuilder<ButtonBuilder>().addComponents(taskButtons)]
         : [];
 
       await interaction.editReply({ embeds: [embed], components: taskRow });
@@ -1386,11 +1426,11 @@ client.on('interactionCreate', async (interaction) => {
           tasks.length === 0
             ? '🎉 Yeay! Kamu tidak memiliki tugas aktif saat ini. Waktunya santai!'
             : tasks.map((t, idx) => {
-                const dl = t.dueAt ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R>` : 'Tanpa deadline';
-                const linkText = t.linkUrl ? ` | 🔗 [Link](${t.linkUrl})` : '';
-                const typeBadge = t.taskType === 'GROUP' ? '👥 [Kelompok]' : '👤 [Individu]';
-                return `**${idx + 1}. ${typeBadge} ${t.title}**\n${priorityEmoji[t.priority] || '⚡'} Prioritas: **${t.priority}** | ⏰ Deadline: ${dl}${linkText}`;
-              }).join('\n\n')
+              const dl = t.dueAt ? `<t:${Math.floor(t.dueAt.getTime() / 1000)}:R>` : 'Tanpa deadline';
+              const linkText = t.linkUrl ? ` | 🔗 [Link](${t.linkUrl})` : '';
+              const typeBadge = t.taskType === 'GROUP' ? '👥 [Kelompok]' : '👤 [Individu]';
+              return `**${idx + 1}. ${typeBadge} ${t.title}**\n${priorityEmoji[t.priority] || '⚡'} Prioritas: **${t.priority}** | ⏰ Deadline: ${dl}${linkText}`;
+            }).join('\n\n')
         )
         .setFooter({ text: 'Gunakan dropdown di bawah untuk memfilter tampilan tugas' });
 
@@ -1433,7 +1473,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
-      
+
       const endOfDay = new Date();
       endOfDay.setHours(23, 59, 59, 999);
 
@@ -1975,6 +2015,45 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply('❌ Terjadi kesalahan saat mengambil tugas mata kuliah.');
       }
     }
+  }
+
+  // /ask - AI Natural Language Task & Deadline Query
+  if (interaction.commandName === 'ask') {
+    await interaction.deferReply();
+    const query = interaction.options.getString('pertanyaan', true);
+
+    try {
+      const { tasks, userStats } = await TaskService.getTasksForAIQuery(
+        interaction.user.id,
+        interaction.guildId || undefined
+      );
+
+      const answer = await AIService.answerTaskQuery(query, tasks, userStats);
+
+      const askEmbed = new EmbedBuilder()
+        .setTitle('🤖 TaskFlow AI Assistant')
+        .setDescription(`> 💬 *"${query}"*\n\n` + answer)
+        .setColor('#5865F2')
+        .setFooter({ text: 'TaskFlow OS • Tanya apa saja tentang tugas & jadwalmu!' })
+        .setTimestamp();
+
+      const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId('room_focus_25')
+          .setLabel('🎯 Mulai Fokus 25m')
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId('room_focus_50')
+          .setLabel('🔥 Deep Work 50m')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await interaction.editReply({ embeds: [askEmbed], components: [actionRow] });
+    } catch (err) {
+      logger.error({ err }, 'Gagal mengeksekusi /ask');
+      await interaction.editReply('❌ Terjadi kesalahan saat memproses pertanyaanmu ke AI.');
+    }
+    return;
   }
 });
 

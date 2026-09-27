@@ -73,6 +73,14 @@ const commands = [
             .setRequired(true)
         )
     ),
+  new SlashCommandBuilder()
+    .setName('ask')
+    .setDescription('Tanya AI apa saja tentang tugas, deadline, jadwal, dan progres belajarmu')
+    .addStringOption(opt =>
+      opt.setName('pertanyaan')
+        .setDescription('Pertanyaanmu (contoh: "Tugas apa yang paling mepet?" atau "Tugas kelompok AI kurang apa?")')
+        .setRequired(true)
+    ),
   new ContextMenuCommandBuilder()
     .setName('Add to TaskFlow')
     .setType(ApplicationCommandType.Message)

@@ -589,5 +589,54 @@ export class TaskService {
       orderBy: [{ status: 'asc' }, { dueAt: 'asc' }]
     });
   }
+
+  /**
+   * 💬 Ambil seluruh tugas user (dan guild) beserta subtasks untuk konteks AI Query
+   */
+  static async getTasksForAIQuery(discordId: string, discordGuildId?: string) {
+    const user = await prisma.user.findUnique({
+      where: { discordId },
+      include: { focusSessions: true }
+    });
+
+    const orConditions: any[] = [
+      { user: { discordId } },
+      { assignedUserIds: { has: discordId } }
+    ];
+
+    if (discordGuildId) {
+      const guild = await prisma.guild.findUnique({ where: { discordGuildId } });
+      if (guild) {
+        orConditions.push({ guildId: guild.id });
+      }
+    }
+
+    const tasks = await prisma.task.findMany({
+      where: {
+        OR: orConditions,
+        deletedAt: null
+      },
+      include: {
+        subtasks: true
+      },
+      orderBy: [{ status: 'asc' }, { dueAt: 'asc' }],
+      take: 25
+    });
+
+    let userStats = null;
+    if (user) {
+      const totalFocusMinutes = user.focusSessions.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
+      userStats = {
+        username: user.username,
+        xp: user.xp,
+        level: Math.floor(user.xp / 100) + 1,
+        streak: user.streak,
+        totalFocusMinutes
+      };
+    }
+
+    return { tasks, userStats };
+  }
 }
+
 
