@@ -11,6 +11,8 @@ services:
       # Override URL agar konek ke container di dalam Docker network
       - DATABASE_URL=postgresql://taskflow_user:taskflow_password@postgres:5432/taskflow_db?schema=public
       - REDIS_URL=redis://redis:6379
+    ports:
+      - '3000:3000'
     depends_on:
       postgres:
         condition: service_healthy

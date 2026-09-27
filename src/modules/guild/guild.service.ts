@@ -355,6 +355,12 @@ export class GuildService {
         });
         logger.info(`New radar dashboard message ${sent.id} sent in guild ${guildId}`);
       }
+
+      // Broadcast SSE ke web dashboard agar data ter-sync instan tanpa delay
+      try {
+        const { sseService } = await import('../../web/services/sse.service');
+        sseService.broadcast('task:changed', { source: 'discord_bot', guildId });
+      } catch {}
     } catch (err) {
       logger.warn({ err }, 'Gagal update radar dashboard');
     }

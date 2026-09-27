@@ -11,6 +11,10 @@ const envSchema = z.object({
   REDIS_URL: z.string().url(),
   GEMINI_API_KEY: z.string().min(1),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  PORT: z.coerce.number().default(3000),
+  DISCORD_CLIENT_SECRET: z.string().optional(),
+  WEB_BASE_URL: z.string().default('http://localhost:3000'),
+  ADMIN_DISCORD_IDS: z.string().optional(), // Comma-separated Discord IDs with ADMIN role
 });
 
 const parsedEnv = envSchema.safeParse(process.env);

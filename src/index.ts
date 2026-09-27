@@ -30,6 +30,9 @@ import { reminderQueue } from './workers/queue';
 // 🔄 Menyalakan BullMQ Worker secara otomatis saat bot berjalan!
 import './workers/reminder.worker';
 
+// 🌐 Menyalakan TaskFlow Web Dashboard (Express)
+import { startWebServer } from './web/server';
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -1042,20 +1045,41 @@ client.on('interactionCreate', async (interaction) => {
       const minutes = parseInt(parts[3] || '30', 10);
 
       await interaction.deferUpdate();
-      const nextTime = await TaskService.snoozeTask(taskId, minutes);
+      const snoozeResult = await TaskService.snoozeTask(taskId, minutes);
 
-      if (!nextTime) {
+      if (!snoozeResult) {
         await interaction.followUp({ content: '❌ Gagal menunda task atau task sudah selesai.', ephemeral: true });
         return;
       }
 
+      const isRepeated = snoozeResult.snoozeCount >= 3;
       const snoozeEmbed = new EmbedBuilder()
-        .setTitle('💤 Reminder Ditunda')
-        .setDescription(`Reminder untuk tugas ini ditunda selama **${minutes} menit**.\nPengingat berikutnya: <t:${Math.floor(nextTime.getTime() / 1000)}:R>`)
-        .setColor('#F1C40F')
+        .setTitle(isRepeated ? '⚠️ Peringatan Prokrastinasi (Ditunda Berulang)' : '💤 Reminder Ditunda')
+        .setDescription(
+          `Reminder untuk tugas ini ditunda selama **${minutes} menit**.\nPengingat berikutnya: <t:${Math.floor(snoozeResult.nextReminder.getTime() / 1000)}:R>\n\n` +
+          (isRepeated
+            ? `💡 *Kamu sudah menunda tugas ini sebanyak **${snoozeResult.snoozeCount} kali** berturut-turut! Merasa tugas ini terlalu berat atau bingung mulai dari mana? Gunakan bantuan AI atau lakukan deep work 25 menit:*`
+            : `*Tetap semangat! Manfaatkan waktu jeda ini untuk bersiap ya!*`)
+        )
+        .setColor(isRepeated ? '#E67E22' : '#F1C40F')
         .setTimestamp();
 
-      await interaction.editReply({ embeds: [snoozeEmbed], components: [] });
+      const components: ActionRowBuilder<ButtonBuilder>[] = [];
+      if (isRepeated) {
+        const smartRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`task_breakdown_${taskId}`)
+            .setLabel('🧩 Pecah Subtask (AI)')
+            .setStyle(ButtonStyle.Primary),
+          new ButtonBuilder()
+            .setCustomId(`task_focus_${taskId}_25`)
+            .setLabel('🎯 Cicil 25m (Pomodoro)')
+            .setStyle(ButtonStyle.Success)
+        );
+        components.push(smartRow);
+      }
+
+      await interaction.editReply({ embeds: [snoozeEmbed], components });
       return;
     }
 
@@ -1620,6 +1644,35 @@ client.on('interactionCreate', async (interaction) => {
       logger.error({ err }, 'Gagal setup guild OS');
       await interaction.editReply('❌ Gagal membangun channel. Pastikan bot memiliki izin Manage Channels / Administrator di server ini.');
     }
+  }
+
+  // /dashboard - Buka Tautan Web Dashboard TaskFlow OS
+  if (interaction.commandName === 'dashboard') {
+    const webUrl = env.WEB_BASE_URL || `http://localhost:${env.PORT || 3000}`;
+    const embed = new EmbedBuilder()
+      .setTitle('🌐 TaskFlow OS • Web Dashboard')
+      .setDescription(
+        'Buka Web Dashboard untuk mengakses visualisasi produktivitas lengkap:\n\n' +
+        '• 🚨 **Deadline Radar**: Pemantauan deadline kuliah real-time\n' +
+        '• 📋 **Kanban Board**: Drag & drop / checklist status tugas\n' +
+        '• 🏆 **Student Leaderboard**: Papan peringkat XP & Streak\n' +
+        '• ⏱️ **Focus Room**: Timer Pomodoro interaktif terhubung ke DB\n' +
+        '• ⚡ **System Health**: Status bot, latency WebSocket, dan antrean'
+      )
+      .setColor('#5865F2')
+      .setFooter({ text: 'TaskFlow OS • Powered by Discord OAuth2' })
+      .setTimestamp();
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setLabel('Buka Web Dashboard')
+        .setStyle(ButtonStyle.Link)
+        .setURL(webUrl)
+        .setEmoji('🌐')
+    );
+
+    await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+    return;
   }
 
   if (interaction.commandName === 'task') {
@@ -2495,11 +2548,138 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
   }
+
+  // 🌐 /dashboard - Buka Tautan Web Dashboard
+  if (interaction.commandName === 'dashboard') {
+    const webUrl = env.WEB_BASE_URL || 'http://localhost:3000';
+    const embed = new EmbedBuilder()
+      .setTitle('🌐 Web Dashboard TaskFlow OS')
+      .setDescription(
+        `Akses visualisasi produktivitas lengkap langsung melalui browser:\n\n` +
+        `• 📋 **Kanban Board** (Todo, Sedang Dikerjakan, Selesai)\n` +
+        `• 🚨 **Deadline Radar** (Pantauan tenggat waktu real-time)\n` +
+        `• 🏆 **Student Leaderboard** (XP & Streak peringkat kelas)\n` +
+        `• ⏱️ **Focus Room** (Pomodoro timer dengan ambient sounds)\n` +
+        `• ⚙️ **Pengaturan & Jam Tenang**\n\n` +
+        `👉 **[Buka Web Dashboard](${webUrl})**`
+      )
+      .setColor('#5865F2')
+      .setTimestamp();
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setLabel('Buka Web Dashboard')
+        .setStyle(ButtonStyle.Link)
+        .setURL(webUrl)
+        .setEmoji('🌐')
+    );
+
+    await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+    return;
+  }
+
+  // ⚙️ /settings - Pengaturan Pengguna (Quiet Hours, Timezone, DM)
+  if (interaction.commandName === 'settings') {
+    const sub = interaction.options.getSubcommand();
+    const user = await TaskService.getOrCreateUser(interaction.user.id, interaction.user.username);
+
+    if (sub === 'view') {
+      const qStatus = user.quietHoursEnabled ? '🟢 Aktif' : '🔴 Nonaktif';
+      const dmStatus = user.dmReminders ? '🟢 Aktif' : '🔴 Nonaktif';
+
+      const embed = new EmbedBuilder()
+        .setTitle(`⚙️ Pengaturan Akun: ${interaction.user.username}`)
+        .setDescription(
+          `Kelola preferensi notifikasi dan zona waktu agar bot bekerja sesuai kenyamananmu:\n\n` +
+          `🌐 **Zona Waktu:** \`${user.timezone}\`\n` +
+          `🌙 **Jam Tenang (Quiet Hours):** ${qStatus}\n` +
+          `   • Waktu Mulai: \`${user.quietHoursStart}\`\n` +
+          `   • Waktu Selesai: \`${user.quietHoursEnd}\`\n` +
+          `   *(Bot tidak akan mengirimkan notifikasi biasa saat kamu tidur)*\n\n` +
+          `📩 **Pengingat Direct Message (DM):** ${dmStatus}\n\n` +
+          `*Gunakan subcommand \`/settings timezone\`, \`/settings quiet-hours\`, atau \`/settings dm\` untuk mengubah.*`
+        )
+        .setColor('#5865F2')
+        .setFooter({ text: 'TaskFlow OS • User Preferences' })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      return;
+    }
+
+    if (sub === 'timezone') {
+      const newTz = interaction.options.getString('zona', true);
+      const updated = await prisma.user.update({
+        where: { id: user.id },
+        data: { timezone: newTz }
+      });
+
+      await interaction.reply({
+        content: `✅ Zona waktu kamu berhasil diubah menjadi **\`${updated.timezone}\`**. Seluruh perhitungan tenggat waktu dan jam tenang akan disesuaikan dengan zona ini!`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (sub === 'quiet-hours') {
+      const aktif = interaction.options.getBoolean('aktif', true);
+      const mulai = interaction.options.getString('mulai') || user.quietHoursStart;
+      const selesai = interaction.options.getString('selesai') || user.quietHoursEnd;
+
+      // Validasi format HH:mm jika diberikan
+      const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+      if (!timeRegex.test(mulai) || !timeRegex.test(selesai)) {
+        await interaction.reply({
+          content: '❌ Format jam tidak valid! Gunakan format 24 jam **HH:mm** (contoh: `23:00` atau `07:00`).',
+          ephemeral: true
+        });
+        return;
+      }
+
+      const updated = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          quietHoursEnabled: aktif,
+          quietHoursStart: mulai,
+          quietHoursEnd: selesai
+        }
+      });
+
+      const statusText = updated.quietHoursEnabled
+        ? `🟢 **Diaktifkan** dari jam **\`${updated.quietHoursStart}\`** sampai **\`${updated.quietHoursEnd}\`** (${updated.timezone}). Notifikasi non-urgent akan ditunda hingga kamu bangun!`
+        : `🔴 **Dinonaktifkan**. Pengingat akan dikirim tepat waktu tanpa memandang jam.`;
+
+      await interaction.reply({
+        content: `✅ Jam Tenang berhasil diperbarui:\n${statusText}`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (sub === 'dm') {
+      const aktif = interaction.options.getBoolean('aktif', true);
+      const updated = await prisma.user.update({
+        where: { id: user.id },
+        data: { dmReminders: aktif }
+      });
+
+      const statusText = updated.dmReminders
+        ? '🟢 **Aktif** (Pengingat tugas pribadi & kelompok akan dikirim via DM Discord)'
+        : '🔴 **Nonaktif** (Pengingat hanya akan dikirim ke channel / thread tugas server)';
+
+      await interaction.reply({
+        content: `✅ Notifikasi Direct Message (DM) berhasil diatur ke: ${statusText}`,
+        ephemeral: true
+      });
+      return;
+    }
+  }
 });
 
 async function bootstrap() {
   try {
-    logger.info('Starting TaskFlow Bot...');
+    logger.info('Starting TaskFlow Bot & Web Dashboard...');
+    startWebServer(client);
     await client.login(env.BOT_TOKEN);
   } catch (error) {
     logger.error({ err: error }, 'Failed to start bot');

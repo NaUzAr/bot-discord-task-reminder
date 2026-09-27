@@ -217,7 +217,10 @@ export class TaskService {
     return updatedTask;
   }
 
-  static async snoozeTask(taskId: string, minutes: number = 30): Promise<Date | null> {
+  static async snoozeTask(
+    taskId: string,
+    minutes: number = 30
+  ): Promise<{ nextReminder: Date; snoozeCount: number } | null> {
     const task = await prisma.task.findUnique({ where: { id: taskId } });
     if (!task || task.status === 'DONE' || task.status === 'CANCELLED') return null;
 
@@ -242,6 +245,12 @@ export class TaskService {
 
     const reminderTime = new Date(Date.now() + delay);
 
+    // Increment snooze count pada database
+    const updated = await prisma.task.update({
+      where: { id: taskId },
+      data: { snoozeCount: { increment: 1 } }
+    });
+
     await prisma.reminder.create({
       data: {
         taskId: task.id,
@@ -258,12 +267,12 @@ export class TaskService {
         userId: task.userId,
         taskId: task.id,
         eventType: 'TASK_SNOOZED',
-        metadata: { minutes, nextReminder: reminderTime }
+        metadata: { minutes, nextReminder: reminderTime, snoozeCount: updated.snoozeCount }
       }
     });
 
-    logger.info(`Task ${taskId} di-snooze selama ${minutes} menit`);
-    return reminderTime;
+    logger.info(`Task ${taskId} di-snooze selama ${minutes} menit (Total snooze: ${updated.snoozeCount})`);
+    return { nextReminder: reminderTime, snoozeCount: updated.snoozeCount };
   }
 
   static async startFocusSession(taskId: string, discordId: string, durationMinutes: number = 25, guildId?: string) {

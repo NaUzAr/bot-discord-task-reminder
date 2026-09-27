@@ -106,6 +106,59 @@ const commands = [
             .setRequired(true)
         )
     ),
+  new SlashCommandBuilder()
+    .setName('dashboard')
+    .setDescription('🌐 Buka tautan Web Dashboard TaskFlow OS untuk Kanban & Deadline Radar'),
+  new SlashCommandBuilder()
+    .setName('settings')
+    .setDescription('⚙️ Pengaturan Pengguna: Atur Jam Tenang (Quiet Hours), Zona Waktu, dan DM')
+    .addSubcommand(sub =>
+      sub.setName('view')
+        .setDescription('Lihat konfigurasi preferensi akun kamu saat ini')
+    )
+    .addSubcommand(sub =>
+      sub.setName('timezone')
+        .setDescription('Ubah zona waktu kamu untuk notifikasi yang akurat')
+        .addStringOption(opt =>
+          opt.setName('zona')
+            .setDescription('Pilih zona waktu kamu')
+            .setRequired(true)
+            .addChoices(
+              { name: 'WIB (Waktu Indonesia Barat) - Asia/Jakarta', value: 'Asia/Jakarta' },
+              { name: 'WITA (Waktu Indonesia Tengah) - Asia/Makassar', value: 'Asia/Makassar' },
+              { name: 'WIT (Waktu Indonesia Timur) - Asia/Jayapura', value: 'Asia/Jayapura' },
+              { name: 'UTC (Universal Coordinated Time)', value: 'UTC' }
+            )
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('quiet-hours')
+        .setDescription('Atur jam tenang agar bot tidak mengirim notifikasi saat kamu tidur')
+        .addBooleanOption(opt =>
+          opt.setName('aktif')
+            .setDescription('Aktifkan atau nonaktifkan Jam Tenang')
+            .setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt.setName('mulai')
+            .setDescription('Jam mulai tidur (format HH:mm, contoh: 23:00)')
+            .setRequired(false)
+        )
+        .addStringOption(opt =>
+          opt.setName('selesai')
+            .setDescription('Jam bangun / selesai tidur (format HH:mm, contoh: 07:00)')
+            .setRequired(false)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('dm')
+        .setDescription('Atur apakah pengingat dikirim ke Direct Message (DM) pribadi')
+        .addBooleanOption(opt =>
+          opt.setName('aktif')
+            .setDescription('Aktifkan (True) atau Nonaktifkan (False) notifikasi via DM')
+            .setRequired(true)
+        )
+    ),
   new ContextMenuCommandBuilder()
     .setName('Add to TaskFlow')
     .setType(ApplicationCommandType.Message)
@@ -135,4 +188,9 @@ export async function deployCommands(clientId: string, guildIds: string[] = []) 
   } catch (error) {
     logger.error({ err: error }, 'Gagal mendaftarkan commands');
   }
+}
+
+// Auto-run saat dijalankan via CLI (misal: npx tsx src/bot/deploy-commands.ts)
+if (env.CLIENT_ID) {
+  deployCommands(env.CLIENT_ID);
 }

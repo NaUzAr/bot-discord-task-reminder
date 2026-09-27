@@ -4,14 +4,16 @@ import { logger } from '../shared/utils/logger';
 import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, TextChannel } from 'discord.js';
 import { prisma } from '../database/prisma';
 import { generateGoogleCalendarUrl } from '../shared/utils/calendar';
+import { isWithinQuietHours, calculateNextQuietHoursEndTime } from '../shared/utils/time';
+import { reminderQueue } from './queue';
 
 // 🔄 BullMQ Worker: Menggunakan client Discord untuk notifikasi thread & DM
-const client = new Client({ 
+const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.DirectMessages
-  ] 
+  ]
 });
 client.login(env.BOT_TOKEN);
 
@@ -136,9 +138,9 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
   logger.info(`Memproses reminder untuk task: ${taskId} (Stage: ${stageId || 'DEFAULT'})`);
 
   try {
-    const task = await prisma.task.findUnique({ 
+    const task = await prisma.task.findUnique({
       where: { id: taskId },
-      include: { subtasks: true }
+      include: { subtasks: true, user: true }
     });
 
     if (!task || task.status === 'DONE' || task.status === 'CANCELLED') {
@@ -146,7 +148,39 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
       return;
     }
 
-    const deadlineInfo = task.dueAt 
+    // 🌙 Evaluasi Jam Tenang (Quiet Hours) Pengguna
+    // Jangan ganggu waktu tidur user kecuali ini panggilan darurat terakhir (H-30M atau URGENT)
+    if (task.user && task.user.quietHoursEnabled && stageId !== 'H30M' && stageId !== 'URGENT') {
+      const now = new Date();
+      const inQuiet = isWithinQuietHours(now, {
+        quietHoursStart: task.user.quietHoursStart,
+        quietHoursEnd: task.user.quietHoursEnd,
+        quietHoursEnabled: task.user.quietHoursEnabled,
+        timezone: task.user.timezone,
+      });
+
+      if (inQuiet) {
+        const nextQuietEnd = calculateNextQuietHoursEndTime(now, {
+          quietHoursStart: task.user.quietHoursStart,
+          quietHoursEnd: task.user.quietHoursEnd,
+          quietHoursEnabled: task.user.quietHoursEnabled,
+          timezone: task.user.timezone,
+        });
+
+        // Jika deadline masih setelah jam tenang berakhir, jadwalkan ulang reminder ke jam bangun
+        if (!task.dueAt || task.dueAt.getTime() > nextQuietEnd.getTime()) {
+          const delay = Math.max(1000, nextQuietEnd.getTime() - now.getTime());
+          await reminderQueue.add('send-reminder', job.data, {
+            delay,
+            jobId: `quiet_rescheduled_${task.id}_${stageId || 'DEFAULT'}_${Date.now()}`
+          });
+          logger.info(`🌙 Pengguna ${task.user.username} sedang dalam Jam Tenang (${task.user.quietHoursStart}-${task.user.quietHoursEnd}). Reminder ${stageId} dijadwalkan ulang ke ${nextQuietEnd.toISOString()}`);
+          return;
+        }
+      }
+    }
+
+    const deadlineInfo = task.dueAt
       ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:R> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:F>)`
       : 'Tidak ada batas waktu';
 
@@ -242,9 +276,17 @@ export const reminderWorker = new Worker('reminder-queue', async (job) => {
     // 📩 B. KIRIMKAN JUGA DM KE SELURUH ANGGOTA YANG DI-ASSIGN
     for (const assigneeId of task.assignedUserIds) {
       try {
+        const assigneeUser = await prisma.user.findUnique({ where: { discordId: assigneeId } });
+        if (assigneeUser && !assigneeUser.dmReminders) {
+          logger.info(`Pengguna ${assigneeId} menonaktifkan DM reminders. Notifikasi hanya dikirim ke channel/thread.`);
+          continue;
+        }
+
         const discordUser = await client.users.fetch(assigneeId).catch(() => null);
         if (discordUser) {
-          await discordUser.send({ embeds: [reminderEmbed], components: [row] }).catch(() => null);
+          await discordUser.send({ embeds: [reminderEmbed], components: [row] }).catch((dmErr) => {
+            logger.warn({ dmErr, assigneeId }, 'Gagal mengirim DM reminder (kemungkinan DM dibatasi oleh privasi Discord user)');
+          });
         }
       } catch (dmErr) {
         logger.warn({ dmErr, assigneeId }, 'Gagal mengirim DM reminder');

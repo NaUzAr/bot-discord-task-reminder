@@ -16,6 +16,13 @@ model User {
   username  String
   timezone  String   @default("Asia/Jakarta")
   
+  // 🌙 Pengaturan Pengguna & Jam Tenang (Quiet Hours)
+  quietHoursStart   String    @default("23:00")
+  quietHoursEnd     String    @default("07:00")
+  quietHoursEnabled Boolean   @default(true)
+  dmReminders       Boolean   @default(true)
+  
+  role         Role      @default(USER)
   xp           Int       @default(0)
   streak       Int       @default(0)
   lastActiveAt DateTime?
@@ -80,6 +87,7 @@ model Task {
   assignedUserIds String[]  @default([])
 
   recurringRule String?
+  snoozeCount   Int       @default(0)
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -94,6 +102,11 @@ model Task {
 
   @@index([userId, status, dueAt])
   @@map("tasks")
+}
+
+enum Role {
+  USER
+  ADMIN
 }
 
 enum TaskStatus {

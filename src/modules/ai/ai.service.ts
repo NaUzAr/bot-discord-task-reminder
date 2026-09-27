@@ -18,12 +18,13 @@ export const TaskExtractionSchema = z.object({
     return isNaN(d.getTime()) ? null : d.toISOString();
   }, z.string().datetime().nullable()).describe("The deadline in ISO 8601 UTC format. Null if no deadline is mentioned."),
   estimatedMinutes: z.preprocess((val) => {
+    if (val === undefined || val === null || val === '') return null;
     if (typeof val === 'string') {
       const parsed = parseInt(val, 10);
       return isNaN(parsed) ? null : parsed;
     }
     return val;
-  }, z.number().int().positive().nullable()).describe("Estimated duration in minutes. Null if not mentioned."),
+  }, z.number().int().positive().nullable().optional()).describe("Estimated duration in minutes. Null if not mentioned."),
   priority: z.preprocess((val) => {
     if (typeof val === 'string') {
       const upper = val.toUpperCase();
