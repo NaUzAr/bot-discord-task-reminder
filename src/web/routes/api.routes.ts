@@ -10,7 +10,7 @@ import { sseService } from '../services/sse.service';
 import { ExportService } from '../../modules/export/export.service';
 import { AIService } from '../../modules/ai/ai.service';
 import { AuditLogService } from '../services/audit-log.service';
-import { generateInitialsAvatar } from '../../shared/utils/avatar';
+import { generateInitialsAvatar, getDiscordAvatarUrl } from '../../shared/utils/avatar';
 
 export function createApiRouter(client?: Client) {
   const router = Router();
@@ -616,18 +616,20 @@ export function createApiRouter(client?: Client) {
         },
       });
 
-      const formatted = topUsers.map((u, index) => ({
-        rank: index + 1,
-        id: u.id,
-        username: u.username,
-        discordId: u.discordId,
-        xp: u.xp,
-        streak: u.streak,
-        level: Math.floor(u.xp / 100) + 1,
-        completedTasks: u._count.tasks,
-        focusSessions: u._count.focusSessions,
-        avatarUrl: generateInitialsAvatar(u.username),
-      }));
+      const formatted = await Promise.all(
+        topUsers.map(async (u, index) => ({
+          rank: index + 1,
+          id: u.id,
+          username: u.username,
+          discordId: u.discordId,
+          xp: u.xp,
+          streak: u.streak,
+          level: Math.floor(u.xp / 100) + 1,
+          completedTasks: u._count.tasks,
+          focusSessions: u._count.focusSessions,
+          avatarUrl: await getDiscordAvatarUrl(u.discordId, u.username, client),
+        }))
+      );
 
       return res.json({ leaderboard: formatted });
     } catch (err) {

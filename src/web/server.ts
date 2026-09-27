@@ -7,7 +7,7 @@ import { env } from '../config/env';
 import { logger } from '../shared/utils/logger';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import { authRouter } from './routes/auth.routes';
+import { createAuthRouter } from './routes/auth.routes';
 import { createApiRouter } from './routes/api.routes';
 import { sessionCache } from './services/session-cache.service';
 
@@ -66,7 +66,7 @@ export function startWebServer(client?: Client) {
   });
 
   // API Routes terproteksi
-  app.use('/auth', authLimiter, authRouter);
+  app.use('/auth', authLimiter, createAuthRouter(client));
   app.use('/api/ai', aiLimiter);
   app.use('/api', generalLimiter, createApiRouter(client));
 

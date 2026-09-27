@@ -27,3 +27,44 @@ export function generateInitialsAvatar(name: string): string {
 
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
+
+/**
+ * Returns Discord official default avatar URL based on user snowflake ID.
+ */
+export function getDiscordDefaultAvatar(discordId: string): string {
+  try {
+    const index = Number((BigInt(discordId) >> 22n) % 6n);
+    return `https://cdn.discordapp.com/embed/avatars/${index}.png`;
+  } catch {
+    return `https://cdn.discordapp.com/embed/avatars/0.png`;
+  }
+}
+
+/**
+ * Fetches real Discord avatar URL from Discord Client / REST API if available.
+ * Falls back to Discord default avatar or initials SVG.
+ */
+export async function getDiscordAvatarUrl(
+  discordId: string,
+  username: string,
+  client?: any
+): Promise<string> {
+  if (client && client.isReady && client.isReady() && /^\d{16,20}$/.test(discordId)) {
+    try {
+      const user = await client.users.fetch(discordId);
+      if (user) {
+        return user.displayAvatarURL({ extension: 'png', size: 128 });
+      }
+    } catch {
+      // User might not be cached or rate-limited
+    }
+  }
+
+  // Fallback to Discord default avatar if discordId is a valid snowflake
+  if (/^\d{16,20}$/.test(discordId)) {
+    return getDiscordDefaultAvatar(discordId);
+  }
+
+  // Fallback to offline initials avatar
+  return generateInitialsAvatar(username);
+}

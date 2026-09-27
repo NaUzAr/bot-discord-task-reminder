@@ -1,11 +1,13 @@
 import { Router, Request, Response } from 'express';
+import { Client } from 'discord.js';
 import { env } from '../../config/env';
 import { prisma } from '../../database/prisma';
 import { logger } from '../../shared/utils/logger';
 import { sessionCache } from '../services/session-cache.service';
-import { generateInitialsAvatar } from '../../shared/utils/avatar';
+import { getDiscordAvatarUrl, getDiscordDefaultAvatar } from '../../shared/utils/avatar';
 
-export const authRouter = Router();
+export function createAuthRouter(client?: Client) {
+  const authRouter = Router();
 
 // 1. Inisiasi login Discord OAuth2
 authRouter.get(['/login', '/discord'], (req: Request, res: Response) => {
@@ -109,8 +111,8 @@ authRouter.get('/callback', async (req: Request, res: Response) => {
     });
 
     const avatarUrl = discordUser.avatar
-      ? `https://cdn.discordapp.com/avatars/${discordUser.id}/${discordUser.avatar}.png`
-      : `https://cdn.discordapp.com/embed/avatars/${parseInt(discordUser.id.slice(-2)) % 5}.png`;
+      ? `https://cdn.discordapp.com/avatars/${discordUser.id}/${discordUser.avatar}.png?size=128`
+      : getDiscordDefaultAvatar(discordUser.id);
 
     // Simpan ke Session Cache (Redis + Memory)
     const { token, session, maxAgeSeconds } = await sessionCache.createSession(
@@ -189,6 +191,9 @@ authRouter.post('/direct-login', async (req: Request, res: Response) => {
     data: { lastActiveAt: new Date() },
   });
 
+  // Ambil Avatar Discord asli jika bot aktif
+  const avatarUrl = await getDiscordAvatarUrl(dbUser.discordId, dbUser.username, client);
+
   // Simpan ke Session Cache
   const { token, session, maxAgeSeconds } = await sessionCache.createSession(
     {
@@ -196,6 +201,7 @@ authRouter.post('/direct-login', async (req: Request, res: Response) => {
       discordId: dbUser.discordId,
       username: dbUser.username,
       role: dbUser.role,
+      avatarUrl,
     },
     Boolean(rememberMe)
   );
@@ -275,12 +281,16 @@ authRouter.get('/registered-users', async (_req: Request, res: Response) => {
       },
     });
 
+    const usersWithAvatars = await Promise.all(
+      users.map(async (u) => ({
+        ...u,
+        avatarUrl: await getDiscordAvatarUrl(u.discordId, u.username, client),
+      }))
+    );
+
     return res.json({
       hasOauthConfigured: !!(env.CLIENT_ID && env.DISCORD_CLIENT_SECRET),
-      users: users.map((u) => ({
-        ...u,
-        avatarUrl: generateInitialsAvatar(u.username),
-      })),
+      users: usersWithAvatars,
     });
   } catch (err) {
     return res.status(500).json({ error: 'Gagal mengambil data user terdaftar' });
@@ -311,3 +321,8 @@ const handleLogout = async (req: Request, res: Response) => {
 
 authRouter.get('/logout', handleLogout);
 authRouter.post('/logout', handleLogout);
+
+  return authRouter;
+}
+
+export const authRouter = createAuthRouter();
