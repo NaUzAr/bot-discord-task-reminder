@@ -81,6 +81,31 @@ const commands = [
         .setDescription('Pertanyaanmu (contoh: "Tugas apa yang paling mepet?" atau "Tugas kelompok AI kurang apa?")')
         .setRequired(true)
     ),
+  new SlashCommandBuilder()
+    .setName('repeat')
+    .setDescription('🔁 Tugas Berulang: Buat tugas otomatis yang berulang mingguan/harian')
+    .addSubcommand(sub =>
+      sub.setName('create')
+        .setDescription('Buat tugas berulang baru (gunakan bahasa alami!)')
+        .addStringOption(opt =>
+          opt.setName('input')
+            .setDescription('Contoh: "Jurnal praktikum fisika setiap Jumat jam 23:59"')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('list')
+        .setDescription('Lihat semua tugas berulang aktif kamu')
+    )
+    .addSubcommand(sub =>
+      sub.setName('delete')
+        .setDescription('Hapus/nonaktifkan tugas berulang')
+        .addStringOption(opt =>
+          opt.setName('id')
+            .setDescription('ID tugas berulang yang ingin dihapus (lihat dari /repeat list)')
+            .setRequired(true)
+        )
+    ),
   new ContextMenuCommandBuilder()
     .setName('Add to TaskFlow')
     .setType(ApplicationCommandType.Message)

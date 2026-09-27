@@ -64,6 +64,41 @@ client.once('clientReady', async () => {
 
   // ☀️ Mulai scheduler Daily Morning Briefing (07:00 WIB)
   BriefingService.startScheduler(client);
+
+  // 🔁 Recurring Task Scheduler: Cek tugas berulang setiap 15 menit
+  setInterval(async () => {
+    try {
+      const { createdTasks } = await TaskService.processRecurringTasks();
+      for (const ct of createdTasks) {
+        // Kirim notifikasi DM ke user bahwa tugas baru auto-generated
+        try {
+          const discordUser = await client.users.fetch(ct.discordId).catch(() => null);
+          if (discordUser) {
+            const embed = new EmbedBuilder()
+              .setTitle('🔁 Tugas Berulang Otomatis Dibuat!')
+              .setDescription(
+                `📌 **${ct.title}**\n\n` +
+                `Tugas ini otomatis dibuat dari jadwal berulangmu. Cek detail dan deadline-nya di server ya!`
+              )
+              .setColor('#9B59B6')
+              .setFooter({ text: 'TaskFlow OS • Recurring Task Auto-Generator' })
+              .setTimestamp();
+            await discordUser.send({ embeds: [embed] }).catch(() => null);
+          }
+        } catch { }
+
+        // Update radar dashboard jika ada guild
+        if (ct.guildDiscordId) {
+          await GuildService.updateRadarDashboard(ct.guildDiscordId, client);
+        }
+      }
+    } catch (err) {
+      logger.error({ err }, 'Error pada recurring task scheduler');
+    }
+  }, 15 * 60 * 1000); // Setiap 15 menit
+
+  // Jalankan sekali saat boot untuk proses recurring yang tertunda
+  TaskService.processRecurringTasks().catch(() => null);
 });
 
 // 📥 AUTO-LISTEN: Mendengarkan pesan obrolan di channel inbox-tugas secara otomatis
@@ -2054,6 +2089,138 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.editReply('❌ Terjadi kesalahan saat memproses pertanyaanmu ke AI.');
     }
     return;
+  }
+
+  // /repeat - Tugas Berulang (Recurring Tasks) — Phase 10
+  if (interaction.commandName === 'repeat') {
+    const sub = interaction.options.getSubcommand();
+
+    if (sub === 'create') {
+      await interaction.deferReply();
+      const input = interaction.options.getString('input', true);
+
+      try {
+        const extracted = await AIService.extractRecurringTask(input);
+        if (!extracted) {
+          await interaction.editReply('❌ AI gagal memahami jadwal berulangmu. Coba contoh: *"Jurnal praktikum fisika setiap Jumat jam 23:59"*');
+          return;
+        }
+
+        const dayNames = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+        const patternLabel: Record<string, string> = {
+          'DAILY': '📅 Setiap Hari',
+          'WEEKLY': '📆 Setiap Minggu',
+          'BIWEEKLY': '🗓️ Setiap 2 Minggu'
+        };
+
+        const recurring = await TaskService.createRecurringTask({
+          discordId: interaction.user.id,
+          username: interaction.user.username,
+          guildId: interaction.guildId || undefined,
+          guildName: interaction.guild?.name,
+          title: extracted.title,
+          description: extracted.description,
+          courseName: extracted.courseName,
+          linkUrl: extracted.linkUrl,
+          priority: extracted.priority,
+          subtasks: extracted.subtasks,
+          repeatPattern: extracted.repeatPattern,
+          dayOfWeek: extracted.dayOfWeek,
+          deadlineHour: extracted.deadlineHour,
+          deadlineMinute: extracted.deadlineMinute
+        });
+
+        const scheduleText = extracted.repeatPattern === 'DAILY'
+          ? `Setiap hari jam ${String(extracted.deadlineHour).padStart(2, '0')}:${String(extracted.deadlineMinute).padStart(2, '0')} WIB`
+          : `${patternLabel[extracted.repeatPattern] || extracted.repeatPattern}, ${dayNames[extracted.dayOfWeek ?? 5]} jam ${String(extracted.deadlineHour).padStart(2, '0')}:${String(extracted.deadlineMinute).padStart(2, '0')} WIB`;
+
+        const nextRunText = `<t:${Math.floor(recurring.nextRunAt.getTime() / 1000)}:F> (<t:${Math.floor(recurring.nextRunAt.getTime() / 1000)}:R>)`;
+
+        const embed = new EmbedBuilder()
+          .setTitle('🔁 Tugas Berulang Berhasil Dibuat!')
+          .setDescription(
+            `📌 **Judul:** ${extracted.title}\n` +
+            (extracted.courseName ? `📚 **Mata Kuliah:** ${extracted.courseName}\n` : '') +
+            `🔄 **Jadwal:** ${scheduleText}\n` +
+            `⏰ **Tugas Berikutnya:** ${nextRunText}\n` +
+            `🔥 **Prioritas:** ${extracted.priority}\n` +
+            (extracted.subtasks.length > 0 ? `📋 **Sub-tugas Template:** ${extracted.subtasks.length} item\n` : '') +
+            `\n*Tugas akan otomatis dibuat sesuai jadwal. Kamu akan mendapat DM notifikasi setiap kali tugas baru dibuat.*`
+          )
+          .setColor('#9B59B6')
+          .setFooter({ text: `ID: ${recurring.id} • Gunakan /repeat delete untuk menghapus` })
+          .setTimestamp();
+
+        await interaction.editReply({ embeds: [embed] });
+      } catch (err) {
+        logger.error({ err }, 'Gagal membuat recurring task');
+        await interaction.editReply('❌ Terjadi kesalahan saat membuat tugas berulang.');
+      }
+      return;
+    }
+
+    if (sub === 'list') {
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        const recurrings = await TaskService.getUserRecurringTasks(
+          interaction.user.id,
+          interaction.guildId || undefined
+        );
+
+        if (recurrings.length === 0) {
+          await interaction.editReply('📭 Kamu belum memiliki tugas berulang aktif. Buat dengan `/repeat create`!');
+          return;
+        }
+
+        const dayNames = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
+        const patternEmoji: Record<string, string> = { 'DAILY': '📅', 'WEEKLY': '📆', 'BIWEEKLY': '🗓️' };
+
+        const embed = new EmbedBuilder()
+          .setTitle('🔁 Daftar Tugas Berulang Aktif')
+          .setColor('#9B59B6')
+          .setDescription(
+            recurrings.map((r, i) => {
+              const schedInfo = r.repeatPattern === 'DAILY'
+                ? 'Setiap Hari'
+                : `${r.repeatPattern === 'BIWEEKLY' ? '2 Mingguan' : 'Mingguan'}, ${dayNames[r.dayOfWeek ?? 0]}`;
+              const hourWIB = (r.hourUTC + 7) % 24;
+              const timeStr = `${String(hourWIB).padStart(2, '0')}:${String(r.minuteUTC).padStart(2, '0')} WIB`;
+              const nextRun = `<t:${Math.floor(r.nextRunAt.getTime() / 1000)}:R>`;
+              return `**${i + 1}.** ${patternEmoji[r.repeatPattern] || '🔁'} **${r.title}**\n` +
+                `   ${schedInfo} jam ${timeStr} | Berikutnya: ${nextRun}\n` +
+                `   \`ID: ${r.id}\``;
+            }).join('\n\n')
+          )
+          .setFooter({ text: 'Gunakan /repeat delete id:<ID> untuk menghapus' })
+          .setTimestamp();
+
+        await interaction.editReply({ embeds: [embed] });
+      } catch (err) {
+        logger.error({ err }, 'Gagal mengambil daftar recurring tasks');
+        await interaction.editReply('❌ Gagal mengambil daftar tugas berulang.');
+      }
+      return;
+    }
+
+    if (sub === 'delete') {
+      await interaction.deferReply({ ephemeral: true });
+      const recurringId = interaction.options.getString('id', true);
+
+      try {
+        const deleted = await TaskService.deleteRecurringTask(recurringId, interaction.user.id);
+        if (!deleted) {
+          await interaction.editReply('❌ Tugas berulang tidak ditemukan atau bukan milikmu.');
+          return;
+        }
+
+        await interaction.editReply(`✅ Tugas berulang **"${deleted.title}"** berhasil dinonaktifkan. Tidak akan ada tugas baru yang dibuat dari jadwal ini.`);
+      } catch (err) {
+        logger.error({ err }, 'Gagal menghapus recurring task');
+        await interaction.editReply('❌ Gagal menghapus tugas berulang.');
+      }
+      return;
+    }
   }
 });
 

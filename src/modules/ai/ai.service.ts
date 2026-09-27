@@ -582,6 +582,100 @@ Instruksi:
 
     return `Maaf, aku sedang kesulitan menganalisis datamu saat ini. Coba cek tugas aktifmu langsung dengan perintah \`/tasks\` atau \`/today\` ya! ☕`;
   }
+
+  /**
+   * 🔁 Extract Recurring Task dari input bahasa alami
+   * Contoh: "Jurnal praktikum fisika setiap Jumat jam 23:59"
+   */
+  static async extractRecurringTask(userInput: string, timezone: string = 'Asia/Jakarta'): Promise<{
+    title: string;
+    courseName: string | null;
+    description: string | null;
+    subtasks: string[];
+    linkUrl: string | null;
+    priority: string;
+    repeatPattern: string; // "DAILY" | "WEEKLY" | "BIWEEKLY"
+    dayOfWeek: number | null; // 0=Minggu, 1=Senin, ..., 6=Sabtu
+    deadlineHour: number; // Jam deadline dalam timezone user (0-23)
+    deadlineMinute: number; // Menit deadline (0-59)
+  } | null> {
+    const nowUTC = new Date().toISOString();
+
+    const systemInstruction = `
+You are a recurring task parser for TaskFlow Discord Bot.
+Your job is to extract repeating/recurring task details from Indonesian or English user messages.
+
+Context:
+- Current UTC: ${nowUTC}
+- User Timezone: ${timezone}
+
+Rules:
+1. Extract the task title (what is being repeated).
+2. Detect the repeat pattern:
+   - "setiap hari" / "daily" → "DAILY"
+   - "setiap minggu" / "tiap minggu" / "mingguan" / "setiap [hari]" → "WEEKLY"
+   - "setiap 2 minggu" / "2 mingguan" → "BIWEEKLY"
+3. Detect the day of week (for WEEKLY/BIWEEKLY):
+   - Minggu=0, Senin=1, Selasa=2, Rabu=3, Kamis=4, Jumat=5, Sabtu=6
+   - null for DAILY
+4. Detect the deadline time in the USER'S LOCAL TIMEZONE (${timezone}):
+   - "jam 23:59" → deadlineHour=23, deadlineMinute=59
+   - "jam 8 malam" → deadlineHour=20, deadlineMinute=0
+   - If no time mentioned, default to deadlineHour=23, deadlineMinute=59
+5. Detect academic course name if mentioned (e.g. "Fisika", "Kalkulus", "AI").
+6. Detect subtasks/checklist if mentioned.
+7. Detect submission link if mentioned.
+8. Guess priority (default "MEDIUM").
+
+Output strictly valid JSON:
+{
+  "title": string,
+  "courseName": string | null,
+  "description": string | null,
+  "subtasks": string[],
+  "linkUrl": string | null,
+  "priority": "LOW" | "MEDIUM" | "HIGH" | "URGENT",
+  "repeatPattern": "DAILY" | "WEEKLY" | "BIWEEKLY",
+  "dayOfWeek": number | null,
+  "deadlineHour": number,
+  "deadlineMinute": number
+}
+`;
+
+    for (const modelName of CANDIDATE_MODELS) {
+      try {
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          systemInstruction,
+          generationConfig: { responseMimeType: "application/json" }
+        });
+
+        const result = await model.generateContent(userInput);
+        const textOutput = result.response.text();
+        if (!textOutput) continue;
+
+        const parsed = JSON.parse(textOutput);
+
+        // Validasi minimal
+        if (!parsed.title || !parsed.repeatPattern) continue;
+        if (!['DAILY', 'WEEKLY', 'BIWEEKLY'].includes(parsed.repeatPattern)) {
+          parsed.repeatPattern = 'WEEKLY';
+        }
+        if (parsed.dayOfWeek !== null && (parsed.dayOfWeek < 0 || parsed.dayOfWeek > 6)) {
+          parsed.dayOfWeek = null;
+        }
+        parsed.deadlineHour = typeof parsed.deadlineHour === 'number' ? Math.min(23, Math.max(0, parsed.deadlineHour)) : 23;
+        parsed.deadlineMinute = typeof parsed.deadlineMinute === 'number' ? Math.min(59, Math.max(0, parsed.deadlineMinute)) : 59;
+        parsed.subtasks = Array.isArray(parsed.subtasks) ? parsed.subtasks : [];
+        parsed.priority = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'].includes(parsed.priority) ? parsed.priority : 'MEDIUM';
+
+        return parsed;
+      } catch (err: any) {
+        logger.warn({ model: modelName, err: err?.message || err }, 'Gagal parse recurring task, trying fallback...');
+      }
+    }
+    return null;
+  }
 }
 
 

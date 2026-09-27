@@ -637,6 +637,208 @@ export class TaskService {
 
     return { tasks, userStats };
   }
+
+  // ══════════════════════════════════════════════════════════════
+  // 🔁 RECURRING TASKS (Phase 10)
+  // ══════════════════════════════════════════════════════════════
+
+  /**
+   * Hitung nextRunAt berdasarkan repeat pattern, dayOfWeek, dan jam deadline (UTC)
+   */
+  static computeNextRun(pattern: string, dayOfWeek: number | null, hourUTC: number, minuteUTC: number, afterDate?: Date): Date {
+    const now = afterDate || new Date();
+    const next = new Date(now);
+    next.setUTCSeconds(0, 0);
+    next.setUTCHours(hourUTC, minuteUTC);
+
+    if (pattern === 'DAILY') {
+      // Jika waktu hari ini sudah lewat, set ke besok
+      if (next <= now) {
+        next.setUTCDate(next.getUTCDate() + 1);
+      }
+      return next;
+    }
+
+    // WEEKLY atau BIWEEKLY
+    const targetDay = dayOfWeek ?? 5; // Default Jumat
+    const currentDay = next.getUTCDay();
+    let daysUntil = targetDay - currentDay;
+    if (daysUntil < 0) daysUntil += 7;
+    if (daysUntil === 0 && next <= now) daysUntil = 7;
+    if (pattern === 'BIWEEKLY' && daysUntil <= 7) {
+      // Untuk biweekly, pastikan minimal 7 hari ke depan jika sudah di minggu yang sama
+      if (daysUntil < 7) daysUntil += 7;
+    }
+    next.setUTCDate(next.getUTCDate() + daysUntil);
+    return next;
+  }
+
+  /**
+   * Buat recurring task baru
+   */
+  static async createRecurringTask(data: {
+    discordId: string;
+    username: string;
+    guildId?: string;
+    guildName?: string;
+    title: string;
+    description?: string | null;
+    courseName?: string | null;
+    linkUrl?: string | null;
+    priority?: string;
+    taskType?: string;
+    assignedUserIds?: string[];
+    subtasks?: string[];
+    repeatPattern: string;
+    dayOfWeek: number | null;
+    deadlineHour: number;  // Jam lokal user
+    deadlineMinute: number; // Menit lokal user
+  }) {
+    const user = await this.getOrCreateUser(data.discordId, data.username);
+    let dbGuildId: string | null = null;
+    if (data.guildId) {
+      const guild = await this.getOrCreateGuild(data.guildId, data.guildName);
+      dbGuildId = guild.id;
+    }
+
+    // Convert jam lokal (WIB = UTC+7) ke UTC
+    const hourUTC = (data.deadlineHour - 7 + 24) % 24;
+    const minuteUTC = data.deadlineMinute;
+
+    const nextRunAt = this.computeNextRun(data.repeatPattern, data.dayOfWeek, hourUTC, minuteUTC);
+
+    const recurring = await prisma.recurringTask.create({
+      data: {
+        userId: user.id,
+        guildId: dbGuildId,
+        title: data.title,
+        description: data.description || null,
+        courseName: data.courseName || null,
+        linkUrl: data.linkUrl || null,
+        priority: data.priority || 'MEDIUM',
+        taskType: data.taskType || 'INDIVIDUAL',
+        assignedUserIds: data.assignedUserIds || [data.discordId],
+        subtasks: data.subtasks && data.subtasks.length > 0 ? data.subtasks : undefined,
+        repeatPattern: data.repeatPattern,
+        dayOfWeek: data.dayOfWeek,
+        hourUTC,
+        minuteUTC,
+        nextRunAt,
+        isActive: true
+      }
+    });
+
+    logger.info(`RecurringTask dibuat: "${recurring.title}" (${recurring.repeatPattern}) nextRun=${nextRunAt.toISOString()}`);
+    return recurring;
+  }
+
+  /**
+   * Ambil daftar recurring tasks user
+   */
+  static async getUserRecurringTasks(discordId: string, guildDiscordId?: string) {
+    const user = await prisma.user.findUnique({ where: { discordId } });
+    if (!user) return [];
+
+    const where: any = { userId: user.id, isActive: true };
+    if (guildDiscordId) {
+      const guild = await prisma.guild.findUnique({ where: { discordGuildId: guildDiscordId } });
+      if (guild) where.guildId = guild.id;
+    }
+
+    return prisma.recurringTask.findMany({
+      where,
+      orderBy: { nextRunAt: 'asc' }
+    });
+  }
+
+  /**
+   * Nonaktifkan / hapus recurring task
+   */
+  static async deleteRecurringTask(recurringId: string, discordId: string) {
+    const user = await prisma.user.findUnique({ where: { discordId } });
+    if (!user) return null;
+
+    const recurring = await prisma.recurringTask.findFirst({
+      where: { id: recurringId, userId: user.id }
+    });
+    if (!recurring) return null;
+
+    return prisma.recurringTask.update({
+      where: { id: recurringId },
+      data: { isActive: false }
+    });
+  }
+
+  /**
+   * 🔁 Process Recurring Tasks — Dipanggil oleh scheduler interval
+   * Cek semua recurring yang nextRunAt sudah lewat, buat task baru, lalu update nextRunAt
+   */
+  static async processRecurringTasks(): Promise<{ createdTasks: any[]; errors: string[] }> {
+    const now = new Date();
+    const dueRecurrings = await prisma.recurringTask.findMany({
+      where: {
+        isActive: true,
+        nextRunAt: { lte: now }
+      },
+      include: { user: true, guild: true }
+    });
+
+    const createdTasks: any[] = [];
+    const errors: string[] = [];
+
+    for (const rec of dueRecurrings) {
+      try {
+        // Hitung deadline: nextRunAt + offset hari dari pattern
+        const dueAt = new Date(rec.nextRunAt);
+
+        // Buat task baru
+        const subtasksArray = Array.isArray(rec.subtasks) ? rec.subtasks as string[] : [];
+        const task = await prisma.task.create({
+          data: {
+            userId: rec.userId,
+            guildId: rec.guildId,
+            courseId: rec.courseName || null,
+            title: rec.title,
+            description: rec.description,
+            linkUrl: rec.linkUrl,
+            dueAt,
+            priority: rec.priority as any || 'MEDIUM',
+            status: 'TODO',
+            taskType: rec.taskType,
+            assignedUserIds: rec.assignedUserIds,
+            recurringRule: `${rec.repeatPattern}:${rec.id}`,
+            sourceType: 'RECURRING'
+          }
+        });
+
+        // Buat subtask jika ada template
+        if (subtasksArray.length > 0) {
+          await this.createSubtasks(task.id, subtasksArray);
+        }
+
+        // Jadwalkan reminders untuk task yang baru dibuat
+        if (dueAt) {
+          await this.scheduleTaskReminders(task);
+        }
+
+        // Update nextRunAt ke jadwal berikutnya
+        const nextRun = this.computeNextRun(rec.repeatPattern, rec.dayOfWeek, rec.hourUTC, rec.minuteUTC, now);
+        await prisma.recurringTask.update({
+          where: { id: rec.id },
+          data: { nextRunAt: nextRun, lastCreatedAt: now }
+        });
+
+        createdTasks.push({ taskId: task.id, title: task.title, discordId: rec.user.discordId, guildDiscordId: rec.guild?.discordGuildId });
+        logger.info(`Recurring auto-created task: "${task.title}" (next: ${nextRun.toISOString()})`);
+      } catch (err: any) {
+        const errMsg = `Gagal proses recurring ${rec.id}: ${err?.message || err}`;
+        errors.push(errMsg);
+        logger.error({ err }, errMsg);
+      }
+    }
+
+    return { createdTasks, errors };
+  }
 }
 
 
