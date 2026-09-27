@@ -867,6 +867,11 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
 
+      let normalizedLink = newLink;
+      if (normalizedLink && !normalizedLink.startsWith('http://') && !normalizedLink.startsWith('https://')) {
+        normalizedLink = `https://${normalizedLink}`;
+      }
+
       const priorityEnum = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'].includes(newPriorityText)
         ? (newPriorityText as any)
         : 'MEDIUM';
@@ -877,10 +882,15 @@ client.on('interactionCreate', async (interaction) => {
           title: newTitle,
           dueAt: dueAtDate,
           priority: priorityEnum,
-          linkUrl: newLink,
+          linkUrl: normalizedLink,
           description: newDesc
         }
       });
+
+      // Jadwalkan ulang reminder jika deadline diubah
+      if (updated.dueAt) {
+        await TaskService.scheduleTaskReminders(updated);
+      }
 
       // Perbarui Live Radar Dashboard secara realtime
       if (updated.guildId) {
@@ -888,6 +898,119 @@ client.on('interactionCreate', async (interaction) => {
         if (dbG) await GuildService.updateRadarDashboard(dbG.discordGuildId, client);
       } else if (interaction.guild) {
         await GuildService.updateRadarDashboard(interaction.guild);
+      }
+
+      // 🔄 Perbarui Tampilan Pesan Kartu Tugas Utama di Thread / Channel Secara Realtime!
+      if (interaction.message) {
+        try {
+          const isGroup = updated.taskType === 'GROUP';
+          const embedColor = isGroup ? '#3498DB' : '#00E5FF';
+          const embedTitle = isGroup 
+            ? '👥 Task Kelompok Terdeteksi dari Inbox!' 
+            : '👤 Task Individu Terdeteksi dari Inbox!';
+
+          const memberListText = isGroup
+            ? updated.assignedUserIds.map(id => `<@${id}>`).join(', ')
+            : `<@${updated.userId}>`;
+
+          const deadlineFormatted = updated.dueAt 
+            ? `<t:${Math.floor(updated.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(updated.dueAt.getTime() / 1000)}:R>)` 
+            : 'Tidak ada batas waktu';
+
+          const cardEmbed = new EmbedBuilder()
+            .setTitle(embedTitle)
+            .setDescription(
+              `### **${updated.title}**\n\n` +
+              `🏷️ **Tipe:** **${isGroup ? '👥 Tugas Kelompok' : '👤 Tugas Individu'}**\n` +
+              `👥 **Anggota:** ${memberListText}\n` +
+              `⏰ **Deadline:** ${deadlineFormatted}\n` +
+              `🔥 **Prioritas:** ${updated.priority}`
+            )
+            .setColor(embedColor)
+            .setFooter({ text: isGroup ? 'Tugas Kelompok • Anggota tim otomatis diundang ke thread & diingatkan!' : 'Klik "Edit" untuk ubah rincian, atau "AI Breakdown" untuk memecah tugas!' })
+            .setTimestamp();
+
+          if (updated.description) {
+            cardEmbed.addFields({
+              name: '📝 Spesifikasi & Format Tugas',
+              value: updated.description.length > 1024 ? updated.description.slice(0, 1020) + '...' : updated.description,
+              inline: false
+            });
+          }
+
+          if (updated.linkUrl) {
+            cardEmbed.addFields({
+              name: '🔗 Tempat Pengumpulan',
+              value: `[Klik untuk Membuka Tautan Pengumpulan](${updated.linkUrl})`,
+              inline: false
+            });
+          }
+
+          const primaryButtons = [
+            new ButtonBuilder()
+              .setCustomId(`task_done_${updated.id}`)
+              .setLabel('Selesai')
+              .setStyle(ButtonStyle.Success)
+              .setEmoji('✅'),
+            new ButtonBuilder()
+              .setCustomId(`task_edit_${updated.id}`)
+              .setLabel('Edit')
+              .setStyle(ButtonStyle.Secondary)
+              .setEmoji('✏️'),
+            new ButtonBuilder()
+              .setCustomId(`task_breakdown_${updated.id}`)
+              .setLabel('AI Breakdown')
+              .setStyle(ButtonStyle.Primary)
+              .setEmoji('🧩'),
+            new ButtonBuilder()
+              .setCustomId(`task_snooze_${updated.id}_30`)
+              .setLabel('Tunda 30m')
+              .setStyle(ButtonStyle.Secondary)
+              .setEmoji('💤')
+          ];
+
+          const linkButtons = [];
+          if (updated.dueAt) {
+            const gcalUrl = generateGoogleCalendarUrl(
+              updated.title,
+              updated.dueAt,
+              updated.linkUrl,
+              updated.description
+            );
+            linkButtons.push(
+              new ButtonBuilder()
+                .setLabel('Google Calendar')
+                .setStyle(ButtonStyle.Link)
+                .setURL(gcalUrl)
+                .setEmoji('📅')
+            );
+          }
+
+          if (updated.linkUrl) {
+            try {
+              new URL(updated.linkUrl);
+              linkButtons.push(
+                new ButtonBuilder()
+                  .setLabel('Buka Link Tugas')
+                  .setStyle(ButtonStyle.Link)
+                  .setURL(updated.linkUrl)
+                  .setEmoji('🔗')
+              );
+            } catch {}
+          }
+
+          const actionRows: ActionRowBuilder<ButtonBuilder>[] = [
+            new ActionRowBuilder<ButtonBuilder>().addComponents(primaryButtons)
+          ];
+          if (linkButtons.length > 0) {
+            actionRows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(linkButtons));
+          }
+
+          await interaction.message.edit({ embeds: [cardEmbed], components: actionRows });
+          logger.info(`Pesan kartu task ${updated.id} berhasil diperbarui di Discord channel/thread!`);
+        } catch (editErr) {
+          logger.warn({ editErr }, 'Gagal mengedit pesan asli kartu task');
+        }
       }
 
       const dlStr = updated.dueAt 
