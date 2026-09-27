@@ -155,19 +155,31 @@ client.on('messageCreate', async (message) => {
     let isReusedThread = false;
 
     if (!thread) {
-      // 1. Jika terdeteksi nama mata kuliah, cari apakah sudah ada thread aktif untuk mata kuliah ini di channel
+      // 1. Jika terdeteksi nama mata kuliah, cari apakah sudah ada thread aktif yang SESUAI TIPENYA (Kelompok vs Individu)
       if (extracted.courseName && message.channel.isTextBased() && 'threads' in message.channel) {
         try {
           const activeThreads = await (message.channel as TextChannel).threads.fetchActive().catch(() => null);
           if (activeThreads) {
             const courseLower = extracted.courseName.toLowerCase();
-            const existingCourseThread = activeThreads.threads.find(th => 
-              th.name.toLowerCase().includes(courseLower)
-            );
+            const existingCourseThread = activeThreads.threads.find(th => {
+              const thLower = th.name.toLowerCase();
+              const matchesCourse = thLower.includes(courseLower);
+              if (!matchesCourse) return false;
+
+              if (isGroup) {
+                // Untuk tugas kelompok: HANYA gabung ke thread yang memang ditandai untuk KELOMPOK
+                return thLower.includes('kelompok') || thLower.includes('👥');
+              } else {
+                // Untuk tugas individu: HANYA gabung ke thread individu dan BUKAN thread kelompok
+                const isGroupThread = thLower.includes('kelompok') || thLower.includes('👥');
+                return !isGroupThread;
+              }
+            });
+
             if (existingCourseThread && !existingCourseThread.archived) {
               thread = existingCourseThread;
               isReusedThread = true;
-              logger.info(`Reusing existing course thread: ${thread.name} (${thread.id}) for course: ${extracted.courseName}`);
+              logger.info(`Reusing existing ${isGroup ? 'GROUP' : 'INDIVIDUAL'} course thread: ${thread.name} (${thread.id}) for course: ${extracted.courseName}`);
             }
           }
         } catch (fetchThreadErr) {
@@ -175,12 +187,13 @@ client.on('messageCreate', async (message) => {
         }
       }
 
-      // 2. Jika belum ada thread untuk mata kuliah ini, buat thread baru dengan nama mata kuliah
+      // 2. Jika belum ada thread untuk tipe & mata kuliah ini, buat thread baru dengan nama dan tipe yang terpisah jelas
       if (!thread) {
         try {
+          const threadPrefix = isGroup ? '👥・[Kelompok]' : '📚・[Individu]';
           const threadName = extracted.courseName 
-            ? `📚・${extracted.courseName}`
-            : `${isGroup ? '👥 [Kelompok]' : '👤 [Individu]'} ${extracted.title.slice(0, 75)}`;
+            ? `${threadPrefix} ${extracted.courseName}`
+            : `${threadPrefix} ${extracted.title.slice(0, 75)}`;
 
           thread = await message.startThread({
             name: threadName,
@@ -327,9 +340,11 @@ client.on('messageCreate', async (message) => {
 
     if (thread) {
       const groupNote = isGroup ? ` (👥 Anggota: ${mentionedUsers.map(u => `<@${u.id}>`).join(', ')})` : '';
+      const typeLabel = isGroup ? 'Kelompok' : 'Individu';
+      const courseNote = extracted.courseName ? ` untuk mata kuliah **${extracted.courseName}**` : '';
       const replyContent = isReusedThread
-        ? `✅ **Tugas Baru Dicatat!** Tugas untuk **${extracted.courseName}** digabungkan ke thread mata kuliah: <#${thread.id}>.${groupNote}\n*(Pesan input & notifikasi ini otomatis terhapus dalam 10 detik agar inbox tetap bersih)*`
-        : `✅ **Task ${isGroup ? 'Kelompok' : 'Individu'} Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.${groupNote}\n*(Pesan input & notifikasi ini otomatis terhapus dalam 10 detik agar inbox tetap bersih)*`;
+        ? `✅ **Tugas Baru Dicatat!** Tugas ${typeLabel}${courseNote} digabungkan ke thread ${typeLabel}: <#${thread.id}>.${groupNote}\n*(Pesan input & notifikasi ini otomatis terhapus dalam 10 detik agar inbox tetap bersih)*`
+        : `✅ **Task ${typeLabel} Dicatat!** Buka thread <#${thread.id}> untuk rincian, AI breakdown, dan aksi tugas.${groupNote}\n*(Pesan input & notifikasi ini otomatis terhapus dalam 10 detik agar inbox tetap bersih)*`;
 
       const replyMsg = await message.reply({
         content: replyContent
