@@ -1023,8 +1023,16 @@ client.on('interactionCreate', async (interaction) => {
         `⏰ **Deadline:** ${dlStr}\n` +
         `🔥 **Prioritas:** ${updated.priority}` +
         (updated.description ? `\n📝 **Catatan:** ${updated.description}` : '') +
-        (updated.linkUrl ? `\n🔗 **Link:** [Klik di sini](${updated.linkUrl})` : '')
+        (updated.linkUrl ? `\n🔗 **Link:** [Klik di sini](${updated.linkUrl})` : '') +
+        `\n\n*(Notifikasi ini otomatis tertutup dalam 4 detik agar chat tetap bersih...)*`
       );
+
+      // Otomatis hapus pesan ephemeral ini setelah 4 detik agar tampilan chat selalu bersih
+      setTimeout(async () => {
+        try {
+          await interaction.deleteReply().catch(() => null);
+        } catch {}
+      }, 4000);
       return;
     }
   }
