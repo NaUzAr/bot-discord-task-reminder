@@ -1033,26 +1033,41 @@ export class TaskService {
           .setEmoji('💤')
       ];
 
-      const linkButtons = [];
+      const linkButtons: ButtonBuilder[] = [];
       if (task.dueAt) {
-        const gcalUrl = generateGoogleCalendarUrl(task.title, task.dueAt, task.linkUrl, task.description);
-        linkButtons.push(
-          new ButtonBuilder()
-            .setLabel('Google Calendar')
-            .setStyle(ButtonStyle.Link)
-            .setURL(gcalUrl)
-            .setEmoji('📅')
-        );
+        try {
+          const gcalUrl = generateGoogleCalendarUrl(task.title, task.dueAt, task.linkUrl, task.description);
+          if (gcalUrl && /^https?:\/\//i.test(gcalUrl)) {
+            linkButtons.push(
+              new ButtonBuilder()
+                .setLabel('Google Calendar')
+                .setStyle(ButtonStyle.Link)
+                .setURL(gcalUrl)
+                .setEmoji('📅')
+            );
+          }
+        } catch (e) {
+          logger.warn({ e }, 'Gagal generate gcal button');
+        }
       }
 
       if (task.linkUrl) {
-        linkButtons.push(
-          new ButtonBuilder()
-            .setLabel('Buka Link')
-            .setStyle(ButtonStyle.Link)
-            .setURL(task.linkUrl)
-            .setEmoji('🔗')
-        );
+        try {
+          let validUrl = task.linkUrl.trim();
+          if (!/^https?:\/\//i.test(validUrl)) {
+            validUrl = `https://${validUrl}`;
+          }
+          new URL(validUrl);
+          linkButtons.push(
+            new ButtonBuilder()
+              .setLabel('Buka Link')
+              .setStyle(ButtonStyle.Link)
+              .setURL(validUrl)
+              .setEmoji('🔗')
+          );
+        } catch (e) {
+          logger.warn({ e, linkUrl: task.linkUrl }, 'Link URL tidak valid untuk button');
+        }
       }
 
       const actionRows: ActionRowBuilder<ButtonBuilder>[] = [
@@ -1093,6 +1108,7 @@ export class TaskService {
         .setFooter({ text: `TaskFlow OS Web Sync • ID: ${task.id.slice(-6)}` });
 
       const cardMsg = await targetSendChannel.send({
+        content: `📌 **Rangkuman Tugas Baru:** ${memberListText} tugas baru telah ditambahkan melalui Web Dashboard!`,
         embeds: [embed],
         components: actionRows
       });
@@ -1120,7 +1136,7 @@ export class TaskService {
   /**
    * 🔄 Sinkronisasi Status Tugas dari Web Dashboard ke Discord
    * Mengupdate card embed, mengirim pengumuman di thread, memperbarui Live Radar,
-   * dan mengarsipkan thread jika seluruh tugas di thread telah selesai.
+   * dan menghapus thread jika seluruh tugas di thread telah selesai.
    */
   static async syncTaskStatusToDiscord(
     taskId: string,
@@ -1186,7 +1202,7 @@ export class TaskService {
 
             // Kirim pesan perayaan ke thread
             await (channel as any).send({
-              content: `🎉 **TUGAS SELESAI DARI WEB!**\nTugas **"${task.title}"** telah ditandai **SELESAI** melalui Web Dashboard oleh **${actor}**! (+50 XP diberikan)`
+              content: `🎉 **TUGAS SELESAI DARI WEB!**\nTugas **"${task.title}"** telah ditandai **SELESAI** melalui Web Dashboard oleh **${actor}**! (+50 XP)`
             }).catch(() => null);
 
             // Cek apakah ada tugas aktif lain di thread ini
@@ -1201,17 +1217,25 @@ export class TaskService {
               });
 
               if (remaining === 0) {
+                // Seluruh tugas tuntas -> Hapus thread setelah 3 detik
                 await (channel as any).send({
-                  content: `✨ *Seluruh tugas di thread ini telah tuntas! Thread otomatis diarsipkan dalam 3 detik.*`
+                  content: `🗑️ **Seluruh Tugas Selesai!**\n🎉 Luar biasa! Seluruh tugas di thread ini telah tuntas. Thread akan otomatis dihapus permanen dalam 3 detik agar server tetap rapi dan bersih...`
                 }).catch(() => null);
 
                 setTimeout(async () => {
                   try {
-                    if (channel.isThread() && !channel.archived) {
-                      await channel.setArchived(true, 'Semua tugas telah selesai via Web Dashboard');
+                    if (channel.isThread()) {
+                      await channel.delete('Semua tugas di thread telah selesai via Web Dashboard').catch(async () => {
+                        await channel.setArchived(true, 'Semua tugas selesai via Web Dashboard').catch(() => null);
+                      });
+                      logger.info(`Thread ${channel.id} berhasil dihapus karena seluruh tugas telah selesai.`);
                     }
                   } catch {}
                 }, 3000);
+              } else {
+                await (channel as any).send({
+                  content: `📌 *Masih ada ${remaining} tugas aktif tersisa di thread ini.*`
+                }).catch(() => null);
               }
             }
           } else {
@@ -1306,10 +1330,17 @@ export class TaskService {
             });
 
             if (remaining === 0) {
+              await (channel as any).send({
+                content: `🗑️ *Semua tugas di thread ini telah dihapus. Thread akan otomatis dihapus dalam 3 detik agar server tetap bersih...*`
+              }).catch(() => null);
+
               setTimeout(async () => {
                 try {
-                  if (channel.isThread() && !channel.archived) {
-                    await channel.setArchived(true, 'Tugas terakhir di thread telah dihapus');
+                  if (channel.isThread()) {
+                    await channel.delete('Tugas terakhir di thread telah dihapus via Web Dashboard').catch(async () => {
+                      await channel.setArchived(true, 'Tugas terakhir di thread telah dihapus').catch(() => null);
+                    });
+                    logger.info(`Thread ${channel.id} berhasil dihapus karena task dihapus.`);
                   }
                 } catch {}
               }, 3000);
