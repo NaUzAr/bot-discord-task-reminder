@@ -14,6 +14,9 @@ import { sessionCache } from './services/session-cache.service';
 export function startWebServer(client?: Client) {
   const app = express();
 
+  // Aktifkan trust proxy agar Express & express-rate-limit mengenali IP asli di balik reverse proxy (mis. Render, Nginx, dsb.)
+  app.set('trust proxy', 1);
+
   // 1. Security Headers with Helmet
   app.use(
     helmet({
