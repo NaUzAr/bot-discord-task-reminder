@@ -187,6 +187,10 @@ export class TaskService {
         if (job) await job.remove();
       } catch {}
     }
+    await prisma.reminder.updateMany({
+      where: { taskId, status: 'PENDING' },
+      data: { status: 'CANCELLED' }
+    }).catch(() => null);
   }
 
   static async markTaskDone(taskId: string): Promise<Task | null> {
@@ -1109,6 +1113,424 @@ export class TaskService {
       return true;
     } catch (err) {
       logger.error({ err, taskId }, 'Gagal dispatch task ke Discord');
+      return false;
+    }
+  }
+
+  /**
+   * 🔄 Sinkronisasi Status Tugas dari Web Dashboard ke Discord
+   * Mengupdate card embed, mengirim pengumuman di thread, memperbarui Live Radar,
+   * dan mengarsipkan thread jika seluruh tugas di thread telah selesai.
+   */
+  static async syncTaskStatusToDiscord(
+    taskId: string,
+    client: Client,
+    newStatus: string,
+    actorUsername?: string
+  ): Promise<boolean> {
+    try {
+      const task = await prisma.task.findUnique({
+        where: { id: taskId },
+        include: {
+          user: true,
+          guild: true,
+          subtasks: { orderBy: { position: 'asc' } }
+        }
+      });
+      if (!task || !task.guild?.discordGuildId) return false;
+
+      const discordGuild = client.guilds.cache.get(task.guild.discordGuildId) ||
+        await client.guilds.fetch(task.guild.discordGuildId).catch(() => null);
+
+      // 1. Update Live Radar di channel deadline-radar
+      if (discordGuild) {
+        await GuildService.updateRadarDashboard(discordGuild, client);
+      }
+
+      // 2. Jika ada sourceChannelId, update card embed & kirim notifikasi ke thread
+      if (task.sourceChannelId) {
+        const channel = await client.channels.fetch(task.sourceChannelId).catch(() => null);
+        if (channel && 'send' in channel) {
+          const actor = actorUsername || task.user.username || 'Mahasiswa';
+
+          if (newStatus === 'DONE') {
+            await this.cancelTaskReminders(task.id);
+
+            // Update embed pesan kartu jika ada
+            if (task.sourceMessageId && 'messages' in channel) {
+              try {
+                const cardMsg = await (channel as any).messages.fetch(task.sourceMessageId).catch(() => null);
+                if (cardMsg && cardMsg.editable) {
+                  const subtaskText = task.subtasks.length > 0
+                    ? '\n\n**Subtasks / Checklist:**\n' +
+                      task.subtasks.map(s => `• ✅ ~~${s.title}~~`).join('\n')
+                    : '';
+
+                  const doneEmbed = new EmbedBuilder()
+                    .setTitle(`✅ [SELESAI] ~~${task.title}~~`)
+                    .setDescription(
+                      `🎉 **Tugas Telah Selesai!**\n\n` +
+                      `👤 **Ditandai selesai oleh:** **${actor}** *(via Web Dashboard)*\n` +
+                      `⏰ **Waktu Selesai:** <t:${Math.floor(Date.now() / 1000)}:F>\n` +
+                      (task.courseId ? `📚 **Mata Kuliah:** ${task.courseId}\n` : '') +
+                      subtaskText
+                    )
+                    .setColor('#00FF7F')
+                    .setFooter({ text: `TaskFlow OS • ID: ${task.id.slice(-6)} • Selesai via Web` })
+                    .setTimestamp();
+
+                  await cardMsg.edit({ embeds: [doneEmbed], components: [] }).catch(() => null);
+                }
+              } catch {}
+            }
+
+            // Kirim pesan perayaan ke thread
+            await (channel as any).send({
+              content: `🎉 **TUGAS SELESAI DARI WEB!**\nTugas **"${task.title}"** telah ditandai **SELESAI** melalui Web Dashboard oleh **${actor}**! (+50 XP diberikan)`
+            }).catch(() => null);
+
+            // Cek apakah ada tugas aktif lain di thread ini
+            if (channel.isThread()) {
+              const remaining = await prisma.task.count({
+                where: {
+                  sourceChannelId: channel.id,
+                  status: { in: ['TODO', 'IN_PROGRESS'] },
+                  id: { not: task.id },
+                  deletedAt: null
+                }
+              });
+
+              if (remaining === 0) {
+                await (channel as any).send({
+                  content: `✨ *Seluruh tugas di thread ini telah tuntas! Thread otomatis diarsipkan dalam 3 detik.*`
+                }).catch(() => null);
+
+                setTimeout(async () => {
+                  try {
+                    if (channel.isThread() && !channel.archived) {
+                      await channel.setArchived(true, 'Semua tugas telah selesai via Web Dashboard');
+                    }
+                  } catch {}
+                }, 3000);
+              }
+            }
+          } else {
+            // Status berubah ke selain DONE (misal: IN_PROGRESS atau TODO)
+            if (channel.isThread() && channel.archived) {
+              await channel.setArchived(false).catch(() => null);
+            }
+
+            const statusLabels: Record<string, string> = {
+              IN_PROGRESS: '▶️ Sedang Dikerjakan (In Progress)',
+              TODO: '⏸️ Belum Dikerjakan (Todo)',
+              CANCELLED: '🚫 Dibatalkan'
+            };
+
+            await (channel as any).send({
+              content: `🔄 **Status Diperbarui:** Tugas **"${task.title}"** diubah menjadi **${statusLabels[newStatus] || newStatus}** melalui Web Dashboard oleh **${actor}**.`
+            }).catch(() => null);
+          }
+        }
+      }
+
+      return true;
+    } catch (err) {
+      logger.error({ err, taskId, newStatus }, 'Gagal syncTaskStatusToDiscord');
+      return false;
+    }
+  }
+
+  /**
+   * 🗑️ Sinkronisasi Penghapusan Tugas dari Web Dashboard ke Discord
+   * Mengupdate kartu embed, membatalkan reminder, mengupdate Live Radar,
+   * dan mengarsipkan thread jika kosong.
+   */
+  static async syncTaskDeleteToDiscord(
+    taskId: string,
+    client: Client,
+    actorUsername?: string
+  ): Promise<boolean> {
+    try {
+      const task = await prisma.task.findUnique({
+        where: { id: taskId },
+        include: { user: true, guild: true }
+      });
+      if (!task) return false;
+
+      // Batalkan antrian reminder
+      await this.cancelTaskReminders(taskId);
+
+      // Update radar di Discord server
+      if (task.guild?.discordGuildId) {
+        const discordGuild = client.guilds.cache.get(task.guild.discordGuildId) ||
+          await client.guilds.fetch(task.guild.discordGuildId).catch(() => null);
+        if (discordGuild) {
+          await GuildService.updateRadarDashboard(discordGuild, client);
+        }
+      }
+
+      // Notifikasi & update kartu di thread
+      if (task.sourceChannelId) {
+        const channel = await client.channels.fetch(task.sourceChannelId).catch(() => null);
+        if (channel && 'send' in channel) {
+          const actor = actorUsername || task.user.username || 'Mahasiswa';
+
+          // Update pesan kartu jika ada
+          if (task.sourceMessageId && 'messages' in channel) {
+            try {
+              const cardMsg = await (channel as any).messages.fetch(task.sourceMessageId).catch(() => null);
+              if (cardMsg && cardMsg.editable) {
+                const delEmbed = new EmbedBuilder()
+                  .setTitle(`🗑️ [DIHAPUS] ~~${task.title}~~`)
+                  .setDescription(`Tugas ini telah **dihapus** melalui Web Dashboard oleh **${actor}**.`)
+                  .setColor('#FF3366')
+                  .setTimestamp();
+                await cardMsg.edit({ embeds: [delEmbed], components: [] }).catch(() => null);
+              }
+            } catch {}
+          }
+
+          // Kirim pesan notifikasi ke thread
+          await (channel as any).send({
+            content: `🗑️ **Tugas Dihapus:** Tugas **"${task.title}"** telah dihapus via Web Dashboard oleh **${actor}**.`
+          }).catch(() => null);
+
+          // Jika thread kosong, arsipkan
+          if (channel.isThread()) {
+            const remaining = await prisma.task.count({
+              where: {
+                sourceChannelId: channel.id,
+                status: { in: ['TODO', 'IN_PROGRESS'] },
+                deletedAt: null
+              }
+            });
+
+            if (remaining === 0) {
+              setTimeout(async () => {
+                try {
+                  if (channel.isThread() && !channel.archived) {
+                    await channel.setArchived(true, 'Tugas terakhir di thread telah dihapus');
+                  }
+                } catch {}
+              }, 3000);
+            }
+          }
+        }
+      }
+
+      return true;
+    } catch (err) {
+      logger.error({ err, taskId }, 'Gagal syncTaskDeleteToDiscord');
+      return false;
+    }
+  }
+
+  /**
+   * ☑️ Sinkronisasi Toggle Subtask dari Web Dashboard ke Discord
+   * Memperbarui checklist di kartu embed thread Discord & memberi info ke anggota.
+   */
+  static async syncSubtaskToggleToDiscord(
+    subtaskId: string,
+    client: Client,
+    actorUsername?: string
+  ): Promise<boolean> {
+    try {
+      const subtask = await prisma.subtask.findUnique({
+        where: { id: subtaskId },
+        include: {
+          task: {
+            include: {
+              user: true,
+              guild: true,
+              subtasks: { orderBy: { position: 'asc' } }
+            }
+          }
+        }
+      });
+      if (!subtask || !subtask.task) return false;
+      const task = subtask.task;
+
+      if (task.sourceChannelId) {
+        const channel = await client.channels.fetch(task.sourceChannelId).catch(() => null);
+        if (channel && 'send' in channel) {
+          const actor = actorUsername || task.user.username || 'Mahasiswa';
+          const isDone = subtask.status === 'DONE';
+
+          // Update kartu tugas embed jika ada
+          if (task.sourceMessageId && 'messages' in channel) {
+            try {
+              const cardMsg = await (channel as any).messages.fetch(task.sourceMessageId).catch(() => null);
+              if (cardMsg && cardMsg.editable && cardMsg.embeds.length > 0) {
+                const isGroup = task.taskType === 'GROUP';
+                const deadlineText = task.dueAt
+                  ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)`
+                  : 'Tidak ada batas waktu';
+
+                const memberListText = task.assignedUserIds && task.assignedUserIds.length > 0
+                  ? task.assignedUserIds.map(id => (/^\d{16,20}$/.test(id) ? `<@${id}>` : id)).join(', ')
+                  : `<@${task.user.discordId}>`;
+
+                const subtaskText = task.subtasks.length > 0
+                  ? '\n\n**Subtasks / Checklist:**\n' +
+                    task.subtasks.map(s => `• ${s.status === 'DONE' ? '✅' : '⬜'} ${s.status === 'DONE' ? `~~${s.title}~~` : s.title}`).join('\n')
+                  : '';
+
+                const embed = new EmbedBuilder()
+                  .setTitle(cardMsg.embeds[0].title || task.title)
+                  .setDescription(
+                    `### **${task.title}**\n\n` +
+                    `🏷️ **Tipe:** **${isGroup ? '👥 Tugas Kelompok' : '👤 Tugas Individu'}**\n` +
+                    (task.courseId ? `📚 **Mata Kuliah:** ${task.courseId}\n` : '') +
+                    `👥 **Anggota:** ${memberListText}\n` +
+                    `⏰ **Deadline:** ${deadlineText}\n` +
+                    `🔥 **Prioritas:** ${task.priority}` +
+                    (task.description ? `\n\n📝 **Catatan:** ${task.description}` : '') +
+                    subtaskText
+                  )
+                  .setColor(cardMsg.embeds[0].color || (isGroup ? 0x9B59B6 : 0x00E5FF))
+                  .setFooter({ text: `TaskFlow OS Web Sync • ID: ${task.id.slice(-6)}` });
+
+                await cardMsg.edit({ embeds: [embed] }).catch(() => null);
+              }
+            } catch {}
+          }
+
+          // Kirim pesan kecil di thread
+          await (channel as any).send({
+            content: `☑️ Sub-tugas **"${subtask.title}"** ditandai ${isDone ? '**SELESAI ✅**' : '**BELUM SELESAI ⬜**'} oleh **${actor}** via Web Dashboard.`
+          }).catch(() => null);
+        }
+      }
+
+      return true;
+    } catch (err) {
+      logger.error({ err, subtaskId }, 'Gagal syncSubtaskToggleToDiscord');
+      return false;
+    }
+  }
+
+  /**
+   * ⏰ Sinkronisasi Snooze Tugas dari Web Dashboard ke Discord
+   */
+  static async syncTaskSnoozeToDiscord(
+    taskId: string,
+    client: Client,
+    minutes: number,
+    actorUsername?: string
+  ): Promise<boolean> {
+    try {
+      const task = await prisma.task.findUnique({
+        where: { id: taskId },
+        include: { guild: true, user: true }
+      });
+      if (!task) return false;
+
+      if (task.guild?.discordGuildId) {
+        const discordGuild = client.guilds.cache.get(task.guild.discordGuildId) ||
+          await client.guilds.fetch(task.guild.discordGuildId).catch(() => null);
+        if (discordGuild) {
+          await GuildService.updateRadarDashboard(discordGuild, client);
+        }
+      }
+
+      if (task.sourceChannelId) {
+        const channel = await client.channels.fetch(task.sourceChannelId).catch(() => null);
+        if (channel && 'send' in channel) {
+          const actor = actorUsername || task.user.username || 'Mahasiswa';
+          await (channel as any).send({
+            content: `⏰ **Pengingat Ditunda:** Pengingat tugas **"${task.title}"** ditunda selama **${minutes} menit** oleh **${actor}** via Web Dashboard.`
+          }).catch(() => null);
+        }
+      }
+
+      return true;
+    } catch (err) {
+      logger.error({ err, taskId }, 'Gagal syncTaskSnoozeToDiscord');
+      return false;
+    }
+  }
+
+  /**
+   * ✏️ Sinkronisasi Edit Tugas dari Web Dashboard ke Discord
+   */
+  static async syncTaskEditToDiscord(
+    taskId: string,
+    client: Client,
+    actorUsername?: string
+  ): Promise<boolean> {
+    try {
+      const task = await prisma.task.findUnique({
+        where: { id: taskId },
+        include: {
+          user: true,
+          guild: true,
+          subtasks: { orderBy: { position: 'asc' } }
+        }
+      });
+      if (!task) return false;
+
+      // Update Live Radar
+      if (task.guild?.discordGuildId) {
+        const discordGuild = client.guilds.cache.get(task.guild.discordGuildId) ||
+          await client.guilds.fetch(task.guild.discordGuildId).catch(() => null);
+        if (discordGuild) {
+          await GuildService.updateRadarDashboard(discordGuild, client);
+        }
+      }
+
+      // Update kartu embed & thread
+      if (task.sourceChannelId) {
+        const channel = await client.channels.fetch(task.sourceChannelId).catch(() => null);
+        if (channel && 'send' in channel) {
+          const actor = actorUsername || task.user.username || 'Mahasiswa';
+
+          if (task.sourceMessageId && 'messages' in channel) {
+            try {
+              const cardMsg = await (channel as any).messages.fetch(task.sourceMessageId).catch(() => null);
+              if (cardMsg && cardMsg.editable) {
+                const isGroup = task.taskType === 'GROUP';
+                const deadlineText = task.dueAt
+                  ? `<t:${Math.floor(task.dueAt.getTime() / 1000)}:F> (<t:${Math.floor(task.dueAt.getTime() / 1000)}:R>)`
+                  : 'Tidak ada batas waktu';
+
+                const memberListText = task.assignedUserIds && task.assignedUserIds.length > 0
+                  ? task.assignedUserIds.map(id => (/^\d{16,20}$/.test(id) ? `<@${id}>` : id)).join(', ')
+                  : `<@${task.user.discordId}>`;
+
+                const subtaskText = task.subtasks.length > 0
+                  ? '\n\n**Subtasks / Checklist:**\n' +
+                    task.subtasks.map(s => `• ${s.status === 'DONE' ? '✅' : '⬜'} ${s.status === 'DONE' ? `~~${s.title}~~` : s.title}`).join('\n')
+                  : '';
+
+                const embed = new EmbedBuilder()
+                  .setTitle(isGroup ? '👥 Task Kelompok (Diperbarui)' : '👤 Task Individu (Diperbarui)')
+                  .setDescription(
+                    `### **${task.title}**\n\n` +
+                    `🏷️ **Tipe:** **${isGroup ? '👥 Tugas Kelompok' : '👤 Tugas Individu'}**\n` +
+                    (task.courseId ? `📚 **Mata Kuliah:** ${task.courseId}\n` : '') +
+                    `👥 **Anggota:** ${memberListText}\n` +
+                    `⏰ **Deadline:** ${deadlineText}\n` +
+                    `🔥 **Prioritas:** ${task.priority}` +
+                    (task.description ? `\n\n📝 **Catatan:** ${task.description}` : '') +
+                    subtaskText
+                  )
+                  .setColor(isGroup ? '#9B59B6' : '#00E5FF')
+                  .setFooter({ text: `TaskFlow OS Web Sync • ID: ${task.id.slice(-6)} • Diperbarui via Web` });
+
+                await cardMsg.edit({ embeds: [embed] }).catch(() => null);
+              }
+            } catch {}
+          }
+
+          await (channel as any).send({
+            content: `✏️ **Detail Tugas Diperbarui:** Tugas **"${task.title}"** telah diperbarui via Web Dashboard oleh **${actor}**.`
+          }).catch(() => null);
+        }
+      }
+
+      return true;
+    } catch (err) {
+      logger.error({ err, taskId }, 'Gagal syncTaskEditToDiscord');
       return false;
     }
   }

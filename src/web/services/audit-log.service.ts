@@ -7,6 +7,7 @@ export interface AuditEventPayload {
     | 'TASK_CREATE'
     | 'TASK_COMPLETE'
     | 'TASK_STATUS_UPDATE'
+    | 'TASK_EDIT'
     | 'TASK_DELETE'
     | 'TASK_SNOOZE'
     | 'ROLE_CHANGE'

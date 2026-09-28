@@ -542,10 +542,7 @@ export function createApiRouter(client?: Client) {
         }).catch(() => null);
 
         // Batalkan reminder pending
-        await prisma.reminder.updateMany({
-          where: { taskId: id, status: 'PENDING' },
-          data: { status: 'CANCELLED' },
-        }).catch(() => null);
+        await TaskService.cancelTaskReminders(id);
       }
 
       const session = await getSessionUser(req);
@@ -558,11 +555,76 @@ export function createApiRouter(client?: Client) {
         });
       }
 
+      // 🔄 Realtime Sync ke Discord Server (Thread Card, Notice, & Live Radar)
+      if (client && client.isReady()) {
+        TaskService.syncTaskStatusToDiscord(id, client, status, session?.username).catch((sErr) => {
+          logger.error({ sErr, taskId: id }, 'Gagal sinkronisasi status task ke Discord');
+        });
+      }
+
       sseService.broadcast('task:changed', { action: 'status_updated', taskId: id, status });
       return res.json({ success: true, task: updated });
     } catch (err) {
       logger.error({ err }, 'Error update task status');
       return res.status(500).json({ error: 'Gagal memperbarui status tugas' });
+    }
+  });
+
+  // 5b. Update / Edit Detail Tugas dari Web Dashboard
+  router.patch('/tasks/:id', async (req: Request, res: Response) => {
+    try {
+      const session = await getSessionUser(req);
+      const id = req.params.id as string;
+      const { title, description, dueAt, priority, courseName, courseId, linkUrl } = req.body;
+
+      const existingTask = await prisma.task.findUnique({ where: { id } });
+      if (!existingTask) {
+        return res.status(404).json({ error: 'Tugas tidak ditemukan' });
+      }
+
+      const updateData: any = {};
+      if (typeof title === 'string' && title.trim().length > 0) updateData.title = title.trim();
+      if (description !== undefined) updateData.description = description ? description.trim() : null;
+      if (priority && ['LOW', 'MEDIUM', 'HIGH', 'URGENT'].includes(priority)) updateData.priority = priority;
+      if (courseName !== undefined || courseId !== undefined) updateData.courseId = (courseName || courseId)?.trim() || null;
+      if (linkUrl !== undefined) updateData.linkUrl = linkUrl ? linkUrl.trim() : null;
+      if (dueAt !== undefined) updateData.dueAt = dueAt ? new Date(dueAt) : null;
+
+      const updated = await prisma.task.update({
+        where: { id },
+        data: updateData,
+        include: { subtasks: true, user: true },
+      });
+
+      // Jika dueAt berubah, jadwalkan ulang reminder
+      if (dueAt !== undefined) {
+        await TaskService.cancelTaskReminders(id);
+        if (updated.dueAt && updated.dueAt > new Date()) {
+          await TaskService.scheduleTaskReminders(updated).catch(() => null);
+        }
+      }
+
+      if (session?.id) {
+        await AuditLogService.record({
+          userId: session.id,
+          eventType: 'TASK_EDIT',
+          taskId: id,
+          metadata: { title: updated.title, changes: updateData },
+        });
+      }
+
+      // 🔄 Realtime Sync ke Discord Server
+      if (client && client.isReady()) {
+        TaskService.syncTaskEditToDiscord(id, client, session?.username).catch((sErr) => {
+          logger.error({ sErr, taskId: id }, 'Gagal sinkronisasi edit task ke Discord');
+        });
+      }
+
+      sseService.broadcast('task:changed', { action: 'updated', taskId: id });
+      return res.json({ success: true, task: updated });
+    } catch (err) {
+      logger.error({ err }, 'Error edit task');
+      return res.status(500).json({ error: 'Gagal memperbarui detail tugas' });
     }
   });
 
@@ -590,6 +652,15 @@ export function createApiRouter(client?: Client) {
           where: { id: subtask.task.userId },
           data: { xp: { increment: 10 } },
         }).catch(() => null);
+      }
+
+      const session = await getSessionUser(req);
+
+      // 🔄 Realtime Sync ke Discord Server (Thread Checklist)
+      if (client && client.isReady()) {
+        TaskService.syncSubtaskToggleToDiscord(id, client, session?.username).catch((sErr) => {
+          logger.error({ sErr, subtaskId: id }, 'Gagal sinkronisasi subtask ke Discord');
+        });
       }
 
       sseService.broadcast('task:changed', { action: 'subtask_toggled', subtaskId: id });
@@ -623,6 +694,13 @@ export function createApiRouter(client?: Client) {
         });
       }
 
+      // 🔄 Realtime Sync ke Discord Server (Thread Message & Live Radar)
+      if (client && client.isReady()) {
+        TaskService.syncTaskDeleteToDiscord(id, client, session?.username).catch((sErr) => {
+          logger.error({ sErr, taskId: id }, 'Gagal sinkronisasi hapus task ke Discord');
+        });
+      }
+
       sseService.broadcast('task:changed', { action: 'deleted', taskId: id });
       return res.json({ success: true });
     } catch (err) {
@@ -639,6 +717,16 @@ export function createApiRouter(client?: Client) {
       if (!result) {
         return res.status(404).json({ error: 'Tugas tidak ditemukan atau sudah selesai' });
       }
+
+      const session = await getSessionUser(req);
+
+      // 🔄 Realtime Sync ke Discord Server (Thread notice & Live Radar)
+      if (client && client.isReady()) {
+        TaskService.syncTaskSnoozeToDiscord(id, client, minutes, session?.username).catch((sErr) => {
+          logger.error({ sErr, taskId: id }, 'Gagal sinkronisasi snooze ke Discord');
+        });
+      }
+
       sseService.broadcast('task:changed', { action: 'snoozed', taskId: id });
       return res.json({ success: true, ...result });
     } catch (err) {
