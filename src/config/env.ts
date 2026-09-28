@@ -13,7 +13,7 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   PORT: z.coerce.number().default(3000),
   DISCORD_CLIENT_SECRET: z.string().optional(),
-  WEB_BASE_URL: z.string().default('http://localhost:3000'),
+  WEB_BASE_URL: z.string().default('http://localhost:3000').transform(val => val.replace(/\/+$/, '')),
   ADMIN_DISCORD_IDS: z.string().optional(), // Comma-separated Discord IDs with ADMIN role
 });
 
